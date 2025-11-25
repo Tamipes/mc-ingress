@@ -12,12 +12,16 @@ mod types;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+
+    let commit_hash: &'static str = env!("COMMIT_HASH");
+    tracing::info!("COMMIT_HASH: {}", commit_hash);
+
     let cache = KubeCache::Cache::create().unwrap();
     let arcCache = Arc::new(cache);
-    let commit_hash: &'static str = env!("COMMIT_HASH");
-    println!("COMMIT_HASH: {}", commit_hash);
+    tracing::info!("kube api initialized");
 
     let mut listener = TcpListener::bind("0.0.0.0:25565").await.unwrap();
+    tracing::info!("tcp server started");
 
     loop {
         let (socket, _) = listener.accept().await.unwrap();
@@ -25,7 +29,7 @@ async fn main() {
 
         tokio::spawn(async move {
             if let Err(e) = process_socket(socket, acc).await {
-                eprintln!("ERR: {e:?}");
+                tracing::error!("socket error: {e:?}");
             }
         });
     }
