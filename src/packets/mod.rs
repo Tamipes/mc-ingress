@@ -1,8 +1,9 @@
-use mc_proxy::{types::*, ProtocolState};
 use std::{
     io::{self, Read, Write},
     net::TcpStream,
 };
+
+use crate::types::VarInt;
 pub mod clientbound;
 pub mod serverbound;
 
@@ -103,18 +104,18 @@ impl Packet {
         all.append(&mut vec);
         return Some(all);
     }
-    pub fn proto_name(&self, state: &ProtocolState) -> String {
-        match state {
-            ProtocolState::Handshaking => match self.id.get_int() {
-                0 => "Handshake".to_owned(),
-                _ => "error".to_owned(),
-            },
-            ProtocolState::Status => match self.id.get_int() {
-                0 => "StatusRequest".to_owned(),
-                1 => "PingRequest".to_owned(),
-                _ => "error".to_owned(),
-            },
-            _ => "Dont care state".to_owned(),
-        }
-    }
+    // pub fn proto_name(&self, state: &Type) -> String {
+    //     match state {
+    //         ProtocolState::Handshaking => match self.id.get_int() {
+    //             0 => "Handshake".to_owned(),
+    //             _ => "error".to_owned(),
+    //         },
+    //         ProtocolState::Status => match self.id.get_int() {
+    //             0 => "StatusRequest".to_owned(),
+    //             1 => "PingRequest".to_owned(),
+    //             _ => "error".to_owned(),
+    //         },
+    //         _ => "Dont care state".to_owned(),
+    //     }
+    // }
 }

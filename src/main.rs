@@ -1,37 +1,46 @@
 //! This is a simple imitation of the basic functionality of kubectl:
 //! kubectl {get, delete, apply, watch, edit} <resource> [name]
 //! with labels and namespace selectors supported.
-use anyhow::{bail, Context, Result};
-use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::{
-    api::apps::v1::Deployment, apimachinery::pkg::apis::meta::v1::Time, chrono::Utc,
-};
-use kube::{
-    api::{Api, DynamicObject, ListParams, Patch, PatchParams, ResourceExt},
-    core::GroupVersionKind,
-    discovery::{ApiCapabilities, ApiResource, Discovery, Scope},
-    runtime::{
-        wait::{await_condition, conditions::is_deleted},
-        watcher, WatchStreamExt,
-    },
-    Client,
-};
-use tracing::*;
+use std::sync::Arc;
 
+use tokio::net::{TcpListener, TcpStream};
+
+mod KubeCache;
 mod packets;
 mod types;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt::init();
+    let cache = KubeCache::Cache::create().unwrap();
+    let arcCache = Arc::new(cache);
 
-    let kubeconfig = kube::config::Kubeconfig::read()?;
-    let client = Client::try_from(kubeconfig)?;
+    let mut listener = TcpListener::bind("0.0.0.0:25565").await.unwrap();
 
-    let deployments: Api<Deployment> = Api::default_namespaced(client);
+    loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let acc = arcCache.clone();
 
-    let lp: ListParams = ListParams::default();
-    println!("{:?}", deployments.list(&lp).await?);
-
-    Ok(())
+        tokio::spawn(async move {
+            if let Err(e) = process_socket(socket, acc).await {
+                eprintln!("ERR: {e:?}");
+            }
+        });
+    }
 }
+
+async fn process_socket(stream: TcpStream, cache: Arc<KubeCache::Cache>) -> Result<(), ()> {
+    todo!()
+}
+// ----- Debug tools -----
+// let mc_deployments = cache.get_deploys().await;
+// for dep in mc_deployments.iter() {
+//     println!("{:?}", dep.labels().values())
+// }
+// // println!("{:?}", mc_deployments);
+// println!("count: {}", mc_deployments.iter().count());
+
+// println!(
+//     "{:?}",
+//     cache.query_addr("ferret.tami.moe".to_string()).await
+// );
