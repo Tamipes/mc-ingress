@@ -14,6 +14,8 @@ async fn main() {
     tracing_subscriber::fmt::init();
     let cache = KubeCache::Cache::create().unwrap();
     let arcCache = Arc::new(cache);
+    let commit_hash: &'static str = env!("COMMIT_HASH");
+    println!("COMMIT_HASH: {}", commit_hash);
 
     let mut listener = TcpListener::bind("0.0.0.0:25565").await.unwrap();
 
