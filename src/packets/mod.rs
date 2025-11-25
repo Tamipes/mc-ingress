@@ -1,7 +1,10 @@
-use std::{
-    io::{self, Read, Write},
-    net::TcpStream,
-};
+// use std::io::{self, Read, Write};
+
+use tokio::io;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tracing::instrument;
 
 use crate::types::VarInt;
 pub mod clientbound;
@@ -15,12 +18,12 @@ pub struct Packet {
     pub all: Vec<u8>,
 }
 pub trait SendPacket {
-    fn send_packet(&self, stream: &mut TcpStream) -> io::Result<()>;
+    async fn send_packet(&self, stream: &mut TcpStream) -> io::Result<()>;
 }
 
 impl SendPacket for Packet {
-    fn send_packet(&self, stream: &mut TcpStream) -> io::Result<()> {
-        stream.write_all(&self.all)?;
+    async fn send_packet(&self, stream: &mut TcpStream) -> io::Result<()> {
+        stream.write_all(&self.all).await?;
         Ok(())
     }
 }
@@ -53,14 +56,14 @@ impl Packet {
             all,
         })
     }
-    pub fn parse(buf: &mut TcpStream) -> Option<Packet> {
-        let bytes_iter = &mut buf.bytes().into_iter().map(|x| x.unwrap());
-        let length = VarInt::parse(bytes_iter)?;
-        // println!("---length: {length}");
-        let id = match VarInt::parse(bytes_iter) {
+    #[instrument(level = "trace")]
+    pub async fn parse(buf: &mut TcpStream) -> Option<Packet> {
+        let length = VarInt::parse(buf).await?;
+        tracing::trace!(length = length.get_int());
+        let id = match VarInt::parse(buf).await {
             Some(x) => x,
             None => {
-                println!("Packet id problem(it was None)! REEEEEEEEEEEEEEEEEEEE");
+                tracing::error!("Packet id problem(it was None)! REEEEEEEEEEEEEEEEEEEE");
                 panic!();
                 // return None;
             }
@@ -71,7 +74,7 @@ impl Packet {
         }
 
         let mut data: Vec<u8> = vec![0; length.get_int() as usize - id.get_data().len()];
-        match buf.read_exact(&mut data) {
+        match buf.read_exact(&mut data).await {
             Ok(_) => {
                 // data_id.append(&mut data.clone());
                 // data_length.append(&mut data_id);

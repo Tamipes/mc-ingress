@@ -1,6 +1,4 @@
-use std::io::Write;
-
-use nix::NixPath;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
     packets::{Packet, SendPacket},
@@ -17,12 +15,12 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    pub fn parse(packet: Packet) -> Option<Handshake> {
-        let mut reader = packet.data.clone().into_iter();
-        let protocol_version = VarInt::parse(&mut reader)?;
-        let server_address = VarString::parse(&mut reader)?;
-        let server_port = UShort::parse(&mut reader)?;
-        let next_state = VarInt::parse(&mut reader)?;
+    pub async fn parse(packet: Packet) -> Option<Handshake> {
+        let mut reader = packet.data.clone();
+        let protocol_version = VarInt::parse(&mut reader).await?;
+        let server_address = VarString::parse(&mut reader).await?;
+        let server_port = UShort::parse(&mut reader).await?;
+        let next_state = VarInt::parse(&mut reader).await?;
         Some(Handshake {
             protocol_version,
             server_address,
@@ -62,9 +60,9 @@ impl Handshake {
 }
 
 impl SendPacket for Handshake {
-    fn send_packet(&self, stream: &mut std::net::TcpStream) -> std::io::Result<()> {
-        stream.write_all(&self.all)?;
-        stream.flush()?;
+    async fn send_packet(&self, stream: &mut TcpStream) -> std::io::Result<()> {
+        stream.write_all(&self.all).await?;
+        stream.flush().await?;
         Ok(())
     }
 }

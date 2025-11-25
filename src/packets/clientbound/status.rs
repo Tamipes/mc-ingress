@@ -1,7 +1,8 @@
-use std::{collections::HashMap, io::Write};
+use std::collections::HashMap;
 
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
     packets::{Packet, SendPacket},
@@ -117,11 +118,10 @@ pub struct StatusResponse {
 }
 
 impl StatusResponse {
-    pub fn parse(packet: Packet) -> Option<StatusResponse> {
-        let mut reader = packet.data.into_iter();
+    pub async fn parse(packet: Packet) -> Option<StatusResponse> {
         Some(StatusResponse {
             all: packet.all,
-            json: VarString::parse(&mut reader)?,
+            json: VarString::parse(&mut packet.data.clone()).await?,
         })
     }
     pub fn get_string(&self) -> String {
@@ -137,9 +137,11 @@ impl StatusResponse {
         }
         None
     }
-    pub fn set_json(json: Box<dyn StatusTrait>) -> StatusResponse {
+    pub async fn set_json(json: Box<dyn StatusTrait>) -> StatusResponse {
         let vec = VarString::from(json.get_string()).move_data().unwrap();
-        StatusResponse::parse(Packet::from_bytes(0, vec).unwrap()).unwrap()
+        StatusResponse::parse(Packet::from_bytes(0, vec).unwrap())
+            .await
+            .unwrap()
     }
     pub fn get_all(&self) -> Vec<u8> {
         self.all.clone()
@@ -147,9 +149,9 @@ impl StatusResponse {
 }
 
 impl SendPacket for StatusResponse {
-    fn send_packet(&self, stream: &mut std::net::TcpStream) -> std::io::Result<()> {
-        stream.write_all(&self.all)?;
-        stream.flush()?;
+    async fn send_packet(&self, stream: &mut TcpStream) -> std::io::Result<()> {
+        stream.write_all(&self.all).await?;
+        stream.flush().await?;
         Ok(())
     }
 }

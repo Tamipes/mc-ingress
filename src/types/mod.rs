@@ -1,7 +1,37 @@
 use std::fmt::Display;
 
+use tokio::{
+    io::{self, AsyncRead, AsyncReadExt},
+    net::TcpStream,
+};
+
 const SEGMENT_BITS: u8 = 0x7F;
 const CONTINUE_BIT: u8 = 0x80;
+
+pub trait TamiReader {
+    async fn next_byte(&mut self) -> io::Result<Option<u8>>;
+}
+
+impl TamiReader for TcpStream {
+    async fn next_byte(&mut self) -> io::Result<Option<u8>> {
+        let mut buf: [u8; 1] = [0];
+        let n = self.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(buf[0]))
+    }
+}
+
+impl TamiReader for Vec<u8> {
+    async fn next_byte(&mut self) -> io::Result<Option<u8>> {
+        if self.is_empty() {
+            return Ok(None);
+        } else {
+            return Ok(Some(self.remove(0)));
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct VarInt {
@@ -28,14 +58,18 @@ impl VarInt {
     pub fn move_data(self) -> Vec<u8> {
         self.data
     }
-    pub fn read<I>(data: &mut I) -> Option<i32>
+    pub async fn read<I>(data: &mut I) -> Option<i32>
     where
-        I: Iterator<Item = u8>,
+        I: TamiReader,
     {
         let mut value: i32 = 0;
         let mut position = 0;
 
-        for current_byte in data {
+        loop {
+            let current_byte = match data.next_byte().await {
+                Ok(x) => x?,
+                Err(e) => return None,
+            };
             value |= ((current_byte & SEGMENT_BITS) as i32) << position;
 
             if current_byte & CONTINUE_BIT == 0 {
@@ -49,16 +83,16 @@ impl VarInt {
         }
         Some(value)
     }
-    pub fn parse<I>(reader: &mut I) -> Option<VarInt>
+    pub async fn parse<I>(reader: &mut I) -> Option<VarInt>
     where
-        I: Iterator<Item = u8>,
+        I: TamiReader,
     {
         let mut value: i32 = 0;
         let mut position = 0;
         let mut vec = Vec::new();
 
-        for current_byte in reader {
-            let current_byte = current_byte;
+        loop {
+            let current_byte = reader.next_byte().await.ok()??;
             vec.push(current_byte);
             value |= ((current_byte & SEGMENT_BITS) as i32) << position;
 
@@ -121,14 +155,17 @@ impl VarString {
     pub fn from(string: String) -> VarString {
         VarString { value: string }
     }
-    pub fn parse<I>(data: &mut I) -> Option<VarString>
+    pub async fn parse<I>(data: &mut I) -> Option<VarString>
     where
-        I: Iterator<Item = u8>,
+        I: TamiReader,
     {
-        let length = VarInt::read(data)?;
+        let length = VarInt::read(data).await?;
         let mut vec = Vec::new();
         for _ in 0..length {
-            vec.push(data.next()?);
+            vec.push(match data.next_byte().await {
+                Ok(x) => x?,
+                Err(e) => return None,
+            });
         }
         Some(VarString {
             value: String::from_utf8(vec).ok()?,
@@ -147,14 +184,20 @@ impl UShort {
     pub fn get_data(&self) -> Vec<u8> {
         self.data.clone()
     }
-    pub fn parse<I>(data: &mut I) -> Option<UShort>
+    pub async fn parse<I>(data: &mut I) -> Option<UShort>
     where
-        I: Iterator<Item = u8>,
+        I: TamiReader,
     {
-        let mut vec = vec![data.next()?];
+        let mut vec = vec![match data.next_byte().await {
+            Ok(x) => x?,
+            Err(e) => return None,
+        }];
         let mut int: u16 = vec[0] as u16;
         int = int << 8;
-        vec.push(data.next()?);
+        vec.push(match data.next_byte().await {
+            Ok(x) => x?,
+            Err(_) => return None,
+        });
         int |= vec[1] as u16;
         Some(UShort {
             value: int,

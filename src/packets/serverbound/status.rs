@@ -1,5 +1,7 @@
 use std::io::Write;
 
+use tokio::{io::AsyncWriteExt, net::TcpStream};
+
 use crate::packets::{Packet, SendPacket};
 
 /// id: 0x00
@@ -14,9 +16,9 @@ impl StatusRequest {
 }
 
 impl SendPacket for StatusRequest {
-    fn send_packet(&self, stream: &mut std::net::TcpStream) -> std::io::Result<()> {
-        stream.write_all(&self.all)?;
-        stream.flush()?;
+    async fn send_packet(&self, stream: &mut TcpStream) -> std::io::Result<()> {
+        stream.write_all(&self.all).await?;
+        stream.flush().await?;
         Ok(())
     }
 }
