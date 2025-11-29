@@ -137,7 +137,7 @@ impl StatusResponse {
         }
         None
     }
-    pub async fn set_json(json: Box<dyn StatusTrait>) -> StatusResponse {
+    pub async fn set_json(json: Box<dyn StatusTrait + Send>) -> StatusResponse {
         let vec = VarString::from(json.get_string()).move_data().unwrap();
         StatusResponse::parse(Packet::from_bytes(0, vec).unwrap())
             .await

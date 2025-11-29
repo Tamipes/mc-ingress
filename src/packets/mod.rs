@@ -122,3 +122,29 @@ impl Packet {
     //     }
     // }
 }
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum ProtocolState {
+    Handshaking,
+    Status,
+    Login,
+    Transfer,
+    Configuration,
+    Play,
+    ShutDown,
+}
+
+impl ToString for ProtocolState {
+    fn to_string(&self) -> String {
+        match self {
+            ProtocolState::Handshaking => "Hanshake",
+            ProtocolState::Status => "Status",
+            ProtocolState::Login => "Login",
+            ProtocolState::Configuration => "Configuration ",
+            ProtocolState::Play => "Play",
+            ProtocolState::ShutDown => "Shutdown",
+            ProtocolState::Transfer => "Transfer",
+        }
+        .to_string()
+    }
+}

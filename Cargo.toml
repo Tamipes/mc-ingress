@@ -20,6 +20,7 @@ tokio-stream = { version = "0.1.9", features = ["net"] }
 # Error tracing?
 tracing = "0.1.36"
 tracing-subscriber = {version = "0.3.17", features = ["env-filter"]}
+tracing-error = "0.2.1"
 
 # Needed to parse data to yaml in kubectl
 serde = "1.0.130"

@@ -1,7 +1,7 @@
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
-    packets::{Packet, SendPacket},
+    packets::{Packet, ProtocolState, SendPacket},
     types::{UShort, VarInt, VarString},
 };
 
@@ -13,6 +13,16 @@ pub struct Handshake {
     pub next_state: VarInt,
     all: Vec<u8>,
 }
+impl std::fmt::Debug for Handshake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handshake")
+            .field("protocol_version", &self.protocol_version.get_int())
+            .field("server_address", &self.server_address.get_value())
+            .field("server_port", &self.server_port.get_value())
+            .field("next_state", &self.next_state.get_int())
+            .finish()
+    }
+}
 
 impl Handshake {
     pub async fn parse(packet: Packet) -> Option<Handshake> {
@@ -21,6 +31,11 @@ impl Handshake {
         let server_address = VarString::parse(&mut reader).await?;
         let server_port = UShort::parse(&mut reader).await?;
         let next_state = VarInt::parse(&mut reader).await?;
+
+        // If you remove this, also fix get_next_state() to return an Option<>
+        if next_state.get_int() > 3 || next_state.get_int() < 0 {
+            return None;
+        }
         Some(Handshake {
             protocol_version,
             server_address,
@@ -32,8 +47,13 @@ impl Handshake {
     pub fn get_server_address(&self) -> String {
         self.server_address.get_value()
     }
-    pub fn get_next_state(&self) -> i32 {
-        self.next_state.get_int()
+    pub fn get_next_state(&self) -> ProtocolState {
+        match self.next_state.get_int() {
+            1 => ProtocolState::Status,
+            2 => ProtocolState::Login,
+            3 => ProtocolState::Transfer,
+            _ => unreachable!(),
+        }
     }
 
     pub fn create(
