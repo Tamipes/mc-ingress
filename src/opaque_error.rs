@@ -38,19 +38,29 @@ impl OpaqueError {
         }
     }
     pub fn get_span_trace(&self) -> String {
-        let mut vec = Vec::new();
+        let mut vec: Vec<(&str, String)> = Vec::new();
 
         self.span_trace.with_spans(|metadata, _fields| {
-            vec.push(metadata.name());
+            vec.push((metadata.name(), _fields.into()));
             true
         });
-        vec.iter().rfold(String::new(), |mut acc, x| {
-            if acc.len() != 0 {
-                acc.push_str("::");
+        let str = vec.iter().rfold(String::new(), |mut acc, x| {
+            let first = acc.len() != 0;
+            if first {
+                acc.push_str(":");
             }
-            acc.push_str(x);
+
+            acc.push_str(x.0);
+            acc.push_str("{");
+            acc.push_str(&x.1);
+            acc.push_str("}");
+
             acc
-        })
+        });
+        match String::from_utf8(strip_ansi_escapes::strip(str.clone())) {
+            Ok(x) => x,
+            Err(_) => str,
+        }
     }
 }
 

@@ -2,10 +2,11 @@ use std::{fmt, sync::Arc};
 
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Service};
 use kube::{
-    api::{ListParams, ObjectList},
+    api::{ListParams, ObjectList, Patch, PatchParams},
     runtime::reflector::Lookup,
     Api, Client, ResourceExt,
 };
+use serde_json::json;
 use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::{
@@ -61,19 +62,17 @@ impl Cache {
         Some(result.name()?.to_string())
     }
 
-    // pub fn set_dep(
-    //     &self,
-    //     name: &str,
-    //     pp: &PatchParams,
-    // ) -> impl std::future::Future<Output = Result<Deployment, kube::Error>> {
-    //     let patch = Patch;
-    //     self.deployments.patch(name, pp, patch)
-    // }
+    pub async fn set_dep_scale(&self, name: &str, num: i32) -> Result<Deployment, kube::Error> {
+        let patch = Patch::Merge(json!({"spec":{"replicas": num}}));
+        let pp = PatchParams::default();
+        self.deployments.patch(name, &pp, &patch).await
+    }
 }
 
 pub struct KubeServer {
     dep: Deployment,
     srv: Service,
+    server_addr: String,
 }
 impl fmt::Debug for KubeServer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -96,6 +95,7 @@ impl fmt::Debug for KubeServer {
                     .name
                     .unwrap_or("#error#".to_string()),
             )
+            .field("server_addr", &self.server_addr)
             .finish()
     }
 }
@@ -136,19 +136,23 @@ impl KubeServer {
             )
         })?;
         drop(cache_guard);
-        tracing::info!("found kubernetes deployment & service");
+        tracing::debug!("found kubernetes deployment & service");
 
         return Ok(Self {
             dep: deployment,
             srv: service,
+            server_addr: server_addr.to_string(),
         });
     }
-    fn get_port(&self) -> Option<i32> {
+    pub fn get_port(&self) -> Option<i32> {
         let a = self.srv.clone().spec.unwrap().ports.unwrap();
         let port = a.iter().find(|x| x.name.clone().unwrap() == "mc-router")?;
         port.node_port
     }
     #[tracing::instrument(level = "info")]
+    pub fn get_server_addr(&self) -> String {
+        self.server_addr.clone()
+    }
     pub async fn get_server_status(&self) -> Result<ServerDeploymentStatus, OpaqueError> {
         let mut status = match self.dep.clone().status {
             Some(x) => x,
@@ -238,8 +242,25 @@ impl KubeServer {
                     e
                 )
             })?;
-        tracing::info!("data exchanged while proxing: {:?}", data_amount);
+        tracing::debug!("data exchanged while proxing: {:?}", data_amount);
         Ok(())
+    }
+    pub async fn set_scale(
+        &self,
+        cache: Arc<Mutex<Cache>>,
+        num: i32,
+    ) -> Result<Deployment, kube::Error> {
+        let name = self
+            .srv
+            .metadata
+            .clone()
+            .name
+            .unwrap_or("#error#".to_string());
+        let res = cache.lock().await.set_dep_scale(&name, num).await;
+        if res.is_ok() {
+            tracing::info!("scaled replicas of {} to {num}", self.server_addr);
+        }
+        return res;
     }
 }
 
