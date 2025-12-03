@@ -1,3 +1,4 @@
+use std::env;
 use std::{net::SocketAddr, sync::Arc};
 
 use futures::TryFutureExt;
@@ -30,15 +31,19 @@ async fn main() {
         .with(tracing_error::ErrorLayer::default())
         .init();
 
-    let commit_hash: &'static str = env!("COMMIT_HASH");
-    tracing::info!("revision: {}", commit_hash);
+    let revision: &'static str = env!("COMMIT_HASH");
+    tracing::info!(revision);
 
     let cache = kube_cache::Cache::create().unwrap();
     let arc_cache = Arc::new(Mutex::new(cache));
     tracing::info!("initialized kube api");
 
-    let listener = TcpListener::bind("0.0.0.0:25565").await.unwrap();
-    tracing::info!("started tcp server");
+    let port = match env::var("BIND_PORT") {
+        Ok(x) => x,
+        Err(_) => "25565".to_string(),
+    };
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
+    tracing::info!(port, "started tcp server");
 
     loop {
         let (socket, addr) = listener.accept().await.unwrap();

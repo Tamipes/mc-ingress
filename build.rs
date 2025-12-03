@@ -13,5 +13,5 @@ fn main() {
             }
         }
     };
-    println!("cargo::rustc-env=COMMIT_HASH=\"{}\"", commit_hash);
+    println!("cargo::rustc-env=COMMIT_HASH={}", commit_hash);
 }
