@@ -265,10 +265,19 @@ where
     dep.labels().values().filter(|x| x.as_str() == str).count() > 0
 }
 
-#[derive(Debug)]
 pub enum ServerDeploymentStatus {
     Connectable(TcpStream),
     Starting,
     PodOk,
     Offline,
+}
+impl fmt::Debug for ServerDeploymentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connectable(_) => write!(f, "Connectable"),
+            Self::Starting => write!(f, "Starting"),
+            Self::PodOk => write!(f, "PodOk"),
+            Self::Offline => write!(f, "Offline"),
+        }
+    }
 }

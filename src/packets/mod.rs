@@ -58,28 +58,27 @@ impl Packet {
             all,
         })
     }
-    #[instrument(level = "info",skip(buf),fields(addr = buf.peer_addr().map(|x| x.to_string()).unwrap_or("unknown".to_string())))]
-    pub async fn parse(buf: &mut TcpStream) -> Option<Packet> {
-        let length = VarInt::parse(buf).await?;
+    #[tracing::instrument(level = "info",skip(stream),fields(addr = stream.peer_addr().map(|x| x.to_string()).unwrap_or("unknown".to_string())))]
+    pub async fn parse(stream: &mut TcpStream) -> Result<Packet, ParseError> {
+        let length = VarInt::parse(stream)
+            .await
+            .ok_or(ParseError::IDParseError)?;
 
         tracing::trace!(length = length.get_int());
-        let id = match VarInt::parse(buf).await {
+        let id = match VarInt::parse(stream).await {
             Some(x) => x,
             None => {
-                tracing::error!("could not parse packet id");
-                return None;
+                return Err(ParseError::IDParseError);
             }
         };
         if id.get_int() == 122 {
-            tracing::warn!("weird packet id encountered: 122");
-            return None;
+            return Err(ParseError::WeirdID);
         }
 
         // TODO: investigate this, becuase it is just a hunch
         // but if it is too big, the vec![] macro panics
         if length.get_int() > u16::MAX.into() {
-            tracing::error!(len = length.get_int(), "packet length is too big");
-            return None;
+            return Err(ParseError::LengthIsTooBig(length.get_int()));
         }
         // TODO: this is a bandaid fix; the above check *should* make sure the
         // next line does not run into "capacity overflow", but it doesn't work
@@ -88,26 +87,23 @@ impl Packet {
         }) {
             Ok(x) => x,
             Err(e) => {
-                tracing::error!(
-                    len_int = length.get_int(),
-                    usize = length.get_int() as usize - id.get_data().len(),
-                    len_data = id.get_data().len(),
-                    error = ?e,
-                    "panic while allocating with vec![] macro"
-                );
-                return None;
+                return Err(ParseError::BufferAllocationPanic(format!(
+                    "panic while allocating with vec![] macro len_int={} usize={} len_data={} error={:?}",
+                    id.get_data().len(),
+                    length.get_int(),
+                    length.get_int() as usize - id.get_data().len(),
+                    e
+                )));
             }
         };
 
-        match buf.read_exact(&mut data).await {
+        match stream.read_exact(&mut data).await {
             Ok(_) => {
-                // data_id.append(&mut data.clone());
-                // data_length.append(&mut data_id);
                 let mut vec = id.get_data();
                 vec.append(&mut data.clone());
                 let mut all = length.get_data();
                 all.append(&mut vec);
-                Some(Packet {
+                Ok(Packet {
                     id,
                     length,
                     data,
@@ -115,8 +111,12 @@ impl Packet {
                 })
             }
             Err(e) => {
-                tracing::error!(length = length.get_int(), data = ?length.get_data(),error = e.to_string(),"buffer read error");
-                return None;
+                return Err(ParseError::StreamReadError(format!(
+                    "length={}; data={:?}; error={:?}; ",
+                    length.get_int(),
+                    length.get_data(),
+                    e
+                )));
             }
         }
     }
@@ -127,20 +127,28 @@ impl Packet {
         all.append(&mut vec);
         return Some(all);
     }
-    // pub fn proto_name(&self, state: &Type) -> String {
-    //     match state {
-    //         ProtocolState::Handshaking => match self.id.get_int() {
-    //             0 => "Handshake".to_owned(),
-    //             _ => "error".to_owned(),
-    //         },
-    //         ProtocolState::Status => match self.id.get_int() {
-    //             0 => "StatusRequest".to_owned(),
-    //             1 => "PingRequest".to_owned(),
-    //             _ => "error".to_owned(),
-    //         },
-    //         _ => "Dont care state".to_owned(),
-    //     }
-    // }
+}
+
+pub enum ParseError {
+    IDParseError,
+    WeirdID,
+    LengthIsTooBig(i32),
+    StreamReadError(String),
+    BufferAllocationPanic(String),
+}
+
+impl fmt::Debug for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IDParseError => write!(f, "IDParseError: could not parse packet id"),
+            Self::WeirdID => write!(f, "WeirdID: weird packet id encountered: 122"),
+            Self::LengthIsTooBig(x) => {
+                write!(f, "LengthIsTooBig: packet length is too big; len={x}")
+            }
+            Self::StreamReadError(str) => write!(f, "StreamReadError: {str}"),
+            Self::BufferAllocationPanic(str) => write!(f, "BufferAllocationPanic: {str}"),
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]

@@ -8,9 +8,7 @@ use crate::{
 #[tracing::instrument(skip(client_stream))]
 pub async fn handle_ping(client_stream: &mut TcpStream) -> Result<(), OpaqueError> {
     // --- Respond to ping packet ---
-    let ping_packet = Packet::parse(client_stream)
-        .await
-        .ok_or("Ping packett failed to parse")?;
+    let ping_packet = Packet::parse(client_stream).await?;
     match ping_packet.id.get_int() {
         1 => Ok(ping_packet
             .send_packet(client_stream)
@@ -32,12 +30,7 @@ pub async fn send_disconnect(
     client_stream: &mut TcpStream,
     reason: &str,
 ) -> Result<(), OpaqueError> {
-    let _client_packet = Packet::parse(client_stream).await;
-    if _client_packet.is_none() {
-        return Err(OpaqueError::create(
-            "Client LOGIN START -> malformed packet; Disconnecting...",
-        ));
-    }
+    let _client_packet = Packet::parse(client_stream).await?;
 
     let disconnect_packet =
         crate::packets::clientbound::login::Disconnect::set_reason(reason.to_owned())

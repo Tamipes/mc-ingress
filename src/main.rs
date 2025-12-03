@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use futures::TryFutureExt;
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tracing_subscriber::{prelude::*, EnvFilter};
@@ -73,14 +72,7 @@ async fn process_connection(
     addr: SocketAddr,
     cache: Arc<Mutex<kube_cache::Cache>>,
 ) -> Result<(), OpaqueError> {
-    let client_packet = match Packet::parse(&mut client_stream).await {
-        Some(x) => x,
-        None => {
-            // This is debug, because Packet::parse has all error cases logged with tracing::error
-            tracing::debug!("Client HANDSHAKE -> malformed packet; Disconnecting...");
-            return Ok(());
-        }
-    };
+    let client_packet = Packet::parse(&mut client_stream).await?;
 
     // --- Handshake ---
     let handshake;
@@ -127,9 +119,7 @@ async fn handle_status(
     kube_server: KubeServer,
 ) -> Result<(), OpaqueError> {
     tracing::debug!(handshake = ?handshake);
-    let client_packet = Packet::parse(client_stream)
-        .await
-        .ok_or_else(|| "could not parse client_packet".to_string())?;
+    let client_packet = Packet::parse(client_stream).await?;
     if client_packet.id.get_int() != 0 {
         return Err(OpaqueError::create(&format!(
             "Client STATUS: {:#x} Unknown Id -> Shutdown",
