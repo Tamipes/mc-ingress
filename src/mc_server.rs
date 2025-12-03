@@ -1,4 +1,4 @@
-use tokio::net::TcpStream;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
     packets::{Packet, SendPacket},
@@ -16,13 +16,37 @@ pub async fn handle_ping(client_stream: &mut TcpStream) -> Result<(), OpaqueErro
             .send_packet(client_stream)
             .await
             .map_err(|_| "Failed to send ping")?),
-        _ => {
-            return Err(OpaqueError::create(&format!(
-                "Expected ping packet, got: {}",
-                ping_packet.id.get_int()
-            )));
-        }
+        _ => Err(OpaqueError::create(&format!(
+            "Expected ping packet, got: {}",
+            ping_packet.id.get_int()
+        ))),
     }
 }
 
-// pub async fn handle_redirect(client_stream: &mut TcpStream) -> Result<(), OpaqueError> {}
+/// Disconnects the client.
+///
+/// It works if the client is in the login state, and it
+/// has *already* and *only* sent the handshake packet.
+#[tracing::instrument(skip(client_stream))]
+pub async fn send_disconnect(
+    client_stream: &mut TcpStream,
+    reason: &str,
+) -> Result<(), OpaqueError> {
+    let _client_packet = Packet::parse(client_stream).await;
+    if _client_packet.is_none() {
+        return Err(OpaqueError::create(
+            "Client LOGIN START -> malformed packet; Disconnecting...",
+        ));
+    }
+
+    let disconnect_packet =
+        crate::packets::clientbound::login::Disconnect::set_reason(reason.to_owned())
+            .await
+            .ok_or_else(|| "failed to *create* disconnect packet")?;
+    disconnect_packet
+        .send_packet(client_stream)
+        .await
+        .map_err(|_| "failed to *send* disconnect packet")?;
+    client_stream.flush().await.map_err(|e| e.to_string())?;
+    todo!()
+}

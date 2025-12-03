@@ -24,7 +24,6 @@ mod types;
 #[tokio::main]
 async fn main() {
     // ---- Tracing setup ----
-    // tracing_subscriber::fmt::init();
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_level(true);
@@ -36,21 +35,21 @@ async fn main() {
         .init();
 
     let commit_hash: &'static str = env!("COMMIT_HASH");
-    tracing::info!("COMMIT_HASH: {}", commit_hash);
+    tracing::info!("revision: {}", commit_hash);
 
     let cache = kube_cache::Cache::create().unwrap();
     let arc_cache = Arc::new(Mutex::new(cache));
-    tracing::info!("kube api initialized");
+    tracing::info!("initialized kube api");
 
     let listener = TcpListener::bind("0.0.0.0:25565").await.unwrap();
-    tracing::info!("tcp server started");
+    tracing::info!("started tcp server");
 
     loop {
         let (socket, addr) = listener.accept().await.unwrap();
         let acc = arc_cache.clone();
 
         tokio::spawn(async move {
-            tracing::info!(
+            tracing::debug!(
                 addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                 "Client connected"
             );
@@ -62,7 +61,7 @@ async fn main() {
                     err = format!("{}", e.context)
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                     "Client disconnected"
                 );
@@ -80,7 +79,8 @@ async fn process_connection(
     let client_packet = match Packet::parse(&mut client_stream).await {
         Some(x) => x,
         None => {
-            tracing::trace!("Client HANDSHAKE -> bad packet; Disconnecting...");
+            // This is debug, because Packet::parse has all error cases logged with tracing::error
+            tracing::debug!("Client HANDSHAKE -> malformed packet; Disconnecting...");
             return Ok(());
         }
     };
@@ -95,7 +95,7 @@ async fn process_connection(
     }
     handshake = packets::serverbound::handshake::Handshake::parse(client_packet)
         .await
-        .ok_or_else(|| "Handshake request from client failed to parse".to_string())?;
+        .ok_or_else(|| "handshake request from client failed to parse".to_string())?;
 
     next_server_state = handshake.get_next_state();
 
@@ -113,8 +113,11 @@ async fn process_connection(
             handle_login(&mut client_stream, &handshake, kube_server, cache.clone()).await?
         }
         packets::ProtocolState::Transfer => {
-            return Err(OpaqueError::create("Transfer; Not yet implemented!"))
+            return Err(OpaqueError::create(
+                "next state is transfer; Not yet implemented!",
+            ))
         }
+        // This is used becuase Handshake::parse returns none if is something else
         _ => unreachable!(),
     };
     Ok(())
@@ -129,24 +132,23 @@ async fn handle_status(
     tracing::debug!(handshake = ?handshake);
     let client_packet = Packet::parse(client_stream)
         .await
-        .ok_or_else(|| "Could not parse client_packet".to_string())?;
-    match client_packet.id.get_int() {
-        0 => tracing::info!("status request"),
-        _ => {
-            return Err(OpaqueError::create(&format!(
-                "Client STATUS: {:#x} Unknown Id -> Shutdown",
-                client_packet.id.get_int(),
-            )))
-        }
+        .ok_or_else(|| "could not parse client_packet".to_string())?;
+    if client_packet.id.get_int() != 0 {
+        return Err(OpaqueError::create(&format!(
+            "Client STATUS: {:#x} Unknown Id -> Shutdown",
+            client_packet.id.get_int(),
+        )));
     };
 
     let commit_hash: &'static str = env!("COMMIT_HASH");
     let mut status_struct = StatusStructNew::create();
     status_struct.version.protocol = handshake.protocol_version.get_int();
-    match kube_server.get_server_status().await? {
-        ServerDeploymentStatus::Connectable => {
+    let status = kube_server.get_server_status().await?;
+    tracing::info!(status = ?status, "status request");
+    match status {
+        ServerDeploymentStatus::Connectable(mut server_stream) => {
             return kube_server
-                .proxy_status(handshake, &client_packet, client_stream)
+                .proxy_status(handshake, &client_packet, client_stream, &mut server_stream)
                 .await
         }
         ServerDeploymentStatus::Starting | ServerDeploymentStatus::PodOk => {
@@ -178,10 +180,8 @@ async fn handle_login(
     kube_server: KubeServer,
     cache: Arc<Mutex<Cache>>,
 ) -> Result<(), OpaqueError> {
-    // let client_packet = Packet::parse(client_stream).await.unwrap();
-    tracing::info!("login request");
     match kube_server.get_server_status().await? {
-        ServerDeploymentStatus::Connectable => {
+        ServerDeploymentStatus::Connectable(mut server_stream) => {
             // referenced from:
             // https://github.com/hanyu-dev/tokio-splice2/blob/fc47199fffde8946b0acf867d1fa0b2222267a34/examples/proxy.rs
             let io_sl2sr = tokio_splice2::context::SpliceIoCtx::prepare()
@@ -192,64 +192,33 @@ async fn handle_login(
                 .map_err(|e| format!("tokio_splice2::context::SpliceIoCtx err={}", e.to_string()))?
                 .into_io();
 
-            let port = kube_server
-                .get_port()
-                .ok_or_else(|| "failed to get port from service")?;
-            let mut server_stream = TcpStream::connect(format!("localhost:{}", port))
-                .await
-                .map_err(|_| "Failed to connect to minecraft server")?;
-
             handshake
                 .send_packet(&mut server_stream)
                 .await
-                .map_err(|_| "Failed to forward handshake packet to minecraft server")?;
+                .map_err(|_| "failed to forward handshake packet to minecraft server")?;
 
             tracing::info!("proxying with splice");
             let traffic = tokio_splice2::io::SpliceBidiIo { io_sl2sr, io_sr2sl }
                 .execute(client_stream, &mut server_stream)
                 .await;
+
             tracing::debug!("data exchanged: tx: {} rx: {}", traffic.tx, traffic.rx);
+            if let Some(e) = traffic.error {
+                return Err(OpaqueError::create(&format!(
+                    "failed to splice; err = {}",
+                    e
+                )));
+            }
         }
         ServerDeploymentStatus::PodOk | ServerDeploymentStatus::Starting => {
-            let _client_packet = Packet::parse(client_stream).await;
-            if _client_packet.is_none() {
-                return Err(OpaqueError::create(
-                    "Client LOGIN START -> bad packet; Disconnecting...",
-                ));
-            }
-
-            let disconnect_packet =
-                packets::clientbound::login::Disconnect::set_reason("Starting...§d<3§r".to_owned())
-                    .await
-                    .ok_or_else(|| "failed to *create* disconnect packet")?;
-            disconnect_packet
-                .send_packet(client_stream)
-                .await
-                .map_err(|_| "failed to *send* disconnect packet")?;
-            client_stream.flush().await.map_err(|e| e.to_string())?;
+            mc_server::send_disconnect(client_stream, "Starting...§d<3§r").await?;
         }
         ServerDeploymentStatus::Offline => {
-            let _client_packet = Packet::parse(client_stream).await;
-            if _client_packet.is_none() {
-                return Err(OpaqueError::create(
-                    "Client LOGIN START -> bad packet; Disconnecting...",
-                ));
-            }
-
             kube_server
                 .set_scale(cache, 1)
                 .map_err(|e| format!("Failed to set depoloyment scale: err = {:?}", e))
                 .await?;
-            let disconnect_packet = packets::clientbound::login::Disconnect::set_reason(
-                "Okayy_starting_it...§d<3§r".to_owned(),
-            )
-            .await
-            .ok_or_else(|| "failed to *create* disconnect packet")?;
-            disconnect_packet
-                .send_packet(client_stream)
-                .await
-                .map_err(|_| "failed to *send* disconnect packet")?;
-            client_stream.flush().await.map_err(|e| e.to_string())?;
+            mc_server::send_disconnect(client_stream, "Okayy_starting_it...§d<3§r").await?;
         }
     }
     Ok(())

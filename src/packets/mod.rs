@@ -56,20 +56,27 @@ impl Packet {
             all,
         })
     }
-    #[instrument(level = "trace")]
+    #[instrument(level = "info",skip(buf),fields(addr = buf.peer_addr().map(|x| x.to_string()).unwrap_or("unknown".to_string())))]
     pub async fn parse(buf: &mut TcpStream) -> Option<Packet> {
         let length = VarInt::parse(buf).await?;
+
         tracing::trace!(length = length.get_int());
         let id = match VarInt::parse(buf).await {
             Some(x) => x,
             None => {
-                tracing::error!("Packet id problem(it was None)! REEEEEEEEEEEEEEEEEEEE");
-                panic!();
-                // return None;
+                tracing::error!("could not parse packet id");
+                return None;
             }
         };
-        // println!("---id: {id}");
         if id.get_int() == 122 {
+            tracing::warn!("weird packet id encountered: 122");
+            return None;
+        }
+
+        // TODO: investigate this, becuase it is just a hunch
+        // but if it is too big, the vec![] macro panics
+        if length.get_int() > u16::MAX.into() {
+            tracing::error!(len = length.get_int(), "packet length is too big");
             return None;
         }
 
@@ -89,14 +96,9 @@ impl Packet {
                     all,
                 })
             }
-            Err(x) => {
-                if id.get_int() == 122 {
-                    return None;
-                } else {
-                    println!("len = {}: {:?}", length.get_int(), length.get_data());
-                    println!("Buffer read error: {x}");
-                    return None;
-                }
+            Err(e) => {
+                tracing::error!(length = length.get_int(), data = ?length.get_data(),error = e.to_string(),"buffer read error");
+                return None;
             }
         }
     }

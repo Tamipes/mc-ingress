@@ -100,7 +100,7 @@ impl fmt::Debug for KubeServer {
     }
 }
 impl KubeServer {
-    #[tracing::instrument(name = "KubeServer::create", level = "info", skip(cache, server_addr))]
+    #[tracing::instrument(name = "KubeServer::create", level = "info", skip(cache))]
     pub async fn create(
         cache: Arc<Mutex<kube_cache::Cache>>,
         server_addr: &str,
@@ -153,6 +153,7 @@ impl KubeServer {
     pub fn get_server_addr(&self) -> String {
         self.server_addr.clone()
     }
+    #[tracing::instrument(level = "info")]
     pub async fn get_server_status(&self) -> Result<ServerDeploymentStatus, OpaqueError> {
         let mut status = match self.dep.clone().status {
             Some(x) => x,
@@ -187,9 +188,8 @@ impl KubeServer {
 
         if total_replicas > 0 {
             if ready_replicas > 0 {
-                //TODO: add Connectable check
                 return match self.query_server_connectable().await {
-                    Ok(()) => Ok(ServerDeploymentStatus::Connectable),
+                    Ok(x) => Ok(ServerDeploymentStatus::Connectable(x)),
                     Err(_) => Ok(ServerDeploymentStatus::PodOk),
                 };
             }
@@ -198,51 +198,45 @@ impl KubeServer {
             return Ok(ServerDeploymentStatus::Offline);
         }
     }
-    async fn query_server_connectable(&self) -> Result<(), OpaqueError> {
+    async fn query_server_connectable(&self) -> Result<TcpStream, OpaqueError> {
         let port = self
             .get_port()
             .ok_or_else(|| "failed to get port from service")?;
         let server_stream = TcpStream::connect(format!("localhost:{port}"))
             .await
-            .map_err(|_| "Failed to connect to minecraft server")?;
+            .map_err(|_| "failed to connect to minecraft server")?;
 
         tracing::trace!(
             "successfully connected to backend server; (connectibility check) {:?}",
             server_stream.peer_addr()
         );
-        Ok(())
+        Ok(server_stream)
     }
     pub async fn proxy_status(
         &self,
         handshake: &Handshake,
         status_request: &Packet,
         client_stream: &mut TcpStream,
+        server_stream: &mut TcpStream,
     ) -> Result<(), OpaqueError> {
-        let port = self
-            .get_port()
-            .ok_or_else(|| "failed to get port from service")?;
-        let mut server_stream = TcpStream::connect(format!("localhost:{port}"))
-            .await
-            .map_err(|_| "Failed to connect to minecraft server")?;
-
         handshake
-            .send_packet(&mut server_stream)
+            .send_packet(server_stream)
             .await
-            .map_err(|_| "Failed to forward handshake packet to minecraft server")?;
+            .map_err(|_| "failed to forward handshake packet to minecraft server")?;
         status_request
-            .send_packet(&mut server_stream)
+            .send_packet(server_stream)
             .await
-            .map_err(|_| "Failed to forward status request packet to minecraft server")?;
+            .map_err(|_| "failed to forward status request packet to minecraft server")?;
 
-        let data_amount = tokio::io::copy_bidirectional(client_stream, &mut server_stream)
+        let data_amount = tokio::io::copy_bidirectional(client_stream, server_stream)
             .await
             .map_err(|e| {
                 format!(
-                    "Error during bidirectional copy between server and client; err={:?}",
+                    "error during bidirectional copy between server and client; err={:?}",
                     e
                 )
             })?;
-        tracing::debug!("data exchanged while proxing: {:?}", data_amount);
+        tracing::trace!("data exchanged while proxying status: {:?}", data_amount);
         Ok(())
     }
     pub async fn set_scale(
@@ -273,7 +267,7 @@ where
 
 #[derive(Debug)]
 pub enum ServerDeploymentStatus {
-    Connectable,
+    Connectable(TcpStream),
     Starting,
     PodOk,
     Offline,
