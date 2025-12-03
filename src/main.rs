@@ -1,6 +1,3 @@
-//! This is a simple imitation of the basic functionality of kubectl:
-//! kubectl {get, delete, apply, watch, edit} <resource> [name]
-//! with labels and namespace selectors supported.
 use std::{net::SocketAddr, sync::Arc};
 
 use futures::TryFutureExt;
@@ -27,7 +24,7 @@ async fn main() {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_level(true);
-    let filter_layer = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")); // default to INFO
+    let filter_layer = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(fmt_layer)
         .with(filter_layer)
@@ -55,10 +52,10 @@ async fn main() {
             );
             if let Err(e) = process_connection(socket, addr, acc).await {
                 tracing::error!(
-                    message = format!("Client disconnected"),
                     // addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                     trace = format!("{}", e.get_span_trace()),
-                    err = format!("{}", e.context)
+                    err = format!("{}", e.context),
+                    "Client disconnected"
                 );
             } else {
                 tracing::debug!(
