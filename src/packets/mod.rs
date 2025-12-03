@@ -79,8 +79,24 @@ impl Packet {
             tracing::error!(len = length.get_int(), "packet length is too big");
             return None;
         }
+        // TODO: this is a bandaid fix; the above check *should* make sure the
+        // next line does not run into "capacity overflow", but it doesn't work
+        let mut data: Vec<u8> = match std::panic::catch_unwind(|| {
+            vec![0; length.get_int() as usize - id.get_data().len()]
+        }) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(
+                    len_int = length.get_int(),
+                    usize = length.get_int() as usize - id.get_data().len(),
+                    len_data = id.get_data().len(),
+                    error = ?e,
+                    "panic while allocating with vec![] macro"
+                );
+                return None;
+            }
+        };
 
-        let mut data: Vec<u8> = vec![0; length.get_int() as usize - id.get_data().len()];
         match buf.read_exact(&mut data).await {
             Ok(_) => {
                 // data_id.append(&mut data.clone());
