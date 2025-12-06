@@ -41,5 +41,5 @@ pub async fn send_disconnect(
         .await
         .map_err(|_| "failed to *send* disconnect packet")?;
     client_stream.flush().await.map_err(|e| e.to_string())?;
-    todo!()
+    Ok(())
 }
