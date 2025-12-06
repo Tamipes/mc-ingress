@@ -82,11 +82,11 @@ impl From<&str> for OpaqueError {
     }
 }
 
-impl From<crate::packets::ParseError> for OpaqueError {
-    fn from(value: crate::packets::ParseError) -> Self {
+impl From<crate::packets::ParseErrorTrace> for OpaqueError {
+    fn from(value: crate::packets::ParseErrorTrace) -> Self {
         Self {
-            span_trace: SpanTrace::capture(),
-            context: format!("{:?}", value),
+            span_trace: value.context,
+            context: format!("packet parse error: {:?}", value.inner),
         }
     }
 }

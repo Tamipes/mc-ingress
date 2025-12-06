@@ -89,7 +89,7 @@ async fn process_connection(
     }
     handshake = packets::serverbound::handshake::Handshake::parse(client_packet)
         .await
-        .ok_or_else(|| "handshake request from client failed to parse".to_string())?;
+        .ok_or_else(|| "Client HANDSHAKE -> malformed packet; Disconnecting...".to_string())?;
 
     next_server_state = handshake.get_next_state();
 

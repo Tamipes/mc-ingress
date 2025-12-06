@@ -58,8 +58,8 @@ impl Packet {
             all,
         })
     }
-    #[tracing::instrument(level = "info",skip(stream),fields(addr = stream.peer_addr().map(|x| x.to_string()).unwrap_or("unknown".to_string())))]
-    pub async fn parse(stream: &mut TcpStream) -> Result<Packet, ParseError> {
+    #[tracing::instrument(level = "info", skip(stream))]
+    pub async fn parse(stream: &mut TcpStream) -> Result<Packet, ParseErrorTrace> {
         let length = VarInt::parse(stream)
             .await
             .ok_or(ParseError::IDParseError)?;
@@ -68,23 +68,25 @@ impl Packet {
         let id = match VarInt::parse(stream).await {
             Some(x) => x,
             None => {
-                return Err(ParseError::IDParseError);
+                return Err(ParseError::IDParseError.into());
             }
         };
         if id.get_int() == 122 {
-            return Err(ParseError::WeirdID);
+            return Err(ParseError::WeirdID.into());
         }
 
         // TODO: investigate this, becuase it is just a hunch
         // but if it is too big, the vec![] macro panics
-        if length.get_int() > u16::MAX.into() {
-            return Err(ParseError::LengthIsTooBig(length.get_int()));
+        let data_size = length.get_int() as usize - id.get_data().len();
+        if data_size > u16::MAX.into() {
+            return Err(ParseError::LengthIsTooBig(length.get_int()).into());
         }
-        // TODO: this is a bandaid fix; the above check *should* make sure the
+        if data_size > 0 {
+            return Err(ParseError::PacketLengthInvalid(length.get_int()).into());
+        }
+        // TODO: this is a bandaid fix; the above checks *should* make sure the
         // next line does not run into "capacity overflow", but it doesn't work
-        let mut data: Vec<u8> = match std::panic::catch_unwind(|| {
-            vec![0; length.get_int() as usize - id.get_data().len()]
-        }) {
+        let mut data: Vec<u8> = match std::panic::catch_unwind(|| vec![0; data_size]) {
             Ok(x) => x,
             Err(e) => {
                 return Err(ParseError::BufferAllocationPanic(format!(
@@ -93,7 +95,7 @@ impl Packet {
                     length.get_int(),
                     length.get_int() as usize - id.get_data().len(),
                     e
-                )));
+                )).into());
             }
         };
 
@@ -116,7 +118,8 @@ impl Packet {
                     length.get_int(),
                     length.get_data(),
                     e
-                )));
+                ))
+                .into());
             }
         }
     }
@@ -129,10 +132,26 @@ impl Packet {
     }
 }
 
+pub struct ParseErrorTrace {
+    pub inner: ParseError,
+    pub context: tracing_error::SpanTrace,
+}
+
+impl From<ParseError> for ParseErrorTrace {
+    fn from(value: ParseError) -> Self {
+        Self {
+            inner: value,
+            context: tracing_error::SpanTrace::capture(),
+        }
+    }
+}
+
 pub enum ParseError {
     IDParseError,
     WeirdID,
     LengthIsTooBig(i32),
+    DataIsZero,
+    PacketLengthInvalid(i32),
     StreamReadError(String),
     BufferAllocationPanic(String),
 }
@@ -145,6 +164,11 @@ impl fmt::Debug for ParseError {
             Self::LengthIsTooBig(x) => {
                 write!(f, "LengthIsTooBig: packet length is too big; len={x}")
             }
+            Self::DataIsZero => write!(f, "DataIsZero: data portion of packet does not exist"),
+            Self::PacketLengthInvalid(x) => write!(
+                f,
+                "PacketLengthInvalid: packet lenght is smaller then packet len={x}"
+            ),
             Self::StreamReadError(str) => write!(f, "StreamReadError: {str}"),
             Self::BufferAllocationPanic(str) => write!(f, "BufferAllocationPanic: {str}"),
         }
