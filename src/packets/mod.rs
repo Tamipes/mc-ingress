@@ -6,7 +6,6 @@ use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tracing::instrument;
 
 use crate::types::VarInt;
 pub mod clientbound;
@@ -81,7 +80,7 @@ impl Packet {
         if data_size > u16::MAX.into() {
             return Err(ParseError::LengthIsTooBig(length.get_int()).into());
         }
-        if data_size > 0 {
+        if data_size < 0 {
             return Err(ParseError::PacketLengthInvalid(length.get_int()).into());
         }
         // TODO: this is a bandaid fix; the above checks *should* make sure the
