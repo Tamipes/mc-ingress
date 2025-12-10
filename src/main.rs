@@ -1,12 +1,10 @@
 use std::env;
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 
-use futures::TryFutureExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use crate::kube_cache::{Cache, KubeServer, ServerDeploymentStatus};
+use crate::mc_server::{MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus};
 use crate::opaque_error::OpaqueError;
 use crate::packets::clientbound::status::StatusStructNew;
 use crate::packets::serverbound::handshake::Handshake;
@@ -30,31 +28,31 @@ async fn main() {
         .with(filter_layer)
         .with(tracing_error::ErrorLayer::default())
         .init();
+    tracing::info!("mc-ingress");
 
     let revision: &'static str = env!("COMMIT_HASH");
     tracing::info!(revision);
 
-    let cache = kube_cache::Cache::create().unwrap();
-    let arc_cache = Arc::new(Mutex::new(cache));
+    let api = kube_cache::McApi::create().unwrap();
     tracing::info!("initialized kube api");
 
-    let port = match env::var("BIND_PORT") {
+    let addr = match env::var("BIND_ADDR") {
         Ok(x) => x,
-        Err(_) => "25565".to_string(),
+        Err(_) => "0.0.0.0:25565".to_string(),
     };
-    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
-    tracing::info!(port, "started tcp server");
+    let listener = TcpListener::bind(addr.clone()).await.unwrap();
+    tracing::info!(addr, "started tcp server");
 
     loop {
         let (socket, addr) = listener.accept().await.unwrap();
-        let acc = arc_cache.clone();
+        let api = api.clone();
 
         tokio::spawn(async move {
             tracing::debug!(
                 addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                 "Client connected"
             );
-            if let Err(e) = process_connection(socket, addr, acc).await {
+            if let Err(e) = process_connection(socket, addr, api).await {
                 tracing::error!(
                     // addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                     trace = format!("{}", e.get_span_trace()),
@@ -71,21 +69,22 @@ async fn main() {
     }
 }
 
-#[tracing::instrument(level = "info", skip(cache, client_stream))]
-async fn process_connection(
+#[tracing::instrument(level = "info", skip(api, client_stream))]
+async fn process_connection<T: MinecraftServerHandle>(
     mut client_stream: TcpStream,
     addr: SocketAddr,
-    cache: Arc<Mutex<kube_cache::Cache>>,
+    api: impl MinecraftAPI<T>,
 ) -> Result<(), OpaqueError> {
     let client_packet = Packet::parse(&mut client_stream).await?;
 
     // --- Handshake ---
     let handshake;
     let next_server_state;
-    if client_packet.id.get_int() != 0 {
-        return Err(OpaqueError::create(
-            "Client HANDSHAKE -> bad packet; Disconnecting...",
-        ));
+    let packet_id = client_packet.id.get_int();
+    if packet_id != 0 {
+        return Err(OpaqueError::create(&format!(
+            "Client HANDSHAKE -> bad packet; id={packet_id} Disconnecting..."
+        )));
     }
     handshake = packets::serverbound::handshake::Handshake::parse(client_packet)
         .await
@@ -93,18 +92,15 @@ async fn process_connection(
 
     next_server_state = handshake.get_next_state();
 
-    let kube_server = KubeServer::create(cache.clone(), &handshake.get_server_address()).await?;
-    tracing::debug!(
-        "kube server status: {:?}",
-        kube_server.get_server_status().await?
-    );
+    let server = api.query_server(handshake.get_server_address()).await?;
+    tracing::debug!("kube server status: {:?}", server.query_status().await?);
 
     match next_server_state {
         packets::ProtocolState::Status => {
-            handle_status(&mut client_stream, &handshake, kube_server).await?;
+            handle_status(&mut client_stream, &handshake, server).await?;
         }
         packets::ProtocolState::Login => {
-            handle_login(&mut client_stream, &handshake, kube_server, cache.clone()).await?
+            handle_login(&mut client_stream, &handshake, server).await?
         }
         packets::ProtocolState::Transfer => {
             return Err(OpaqueError::create(
@@ -117,11 +113,11 @@ async fn process_connection(
     Ok(())
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = kube_server.get_server_addr()),skip(client_stream, handshake, kube_server))]
+#[tracing::instrument(level = "info", fields(server_addr = server.get_addr()),skip(client_stream, handshake, server))]
 async fn handle_status(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
-    kube_server: KubeServer,
+    server: impl MinecraftServerHandle,
 ) -> Result<(), OpaqueError> {
     tracing::debug!(handshake = ?handshake);
     let client_packet = Packet::parse(client_stream).await?;
@@ -135,11 +131,11 @@ async fn handle_status(
     let commit_hash: &'static str = env!("COMMIT_HASH");
     let mut status_struct = StatusStructNew::create();
     status_struct.version.protocol = handshake.protocol_version.get_int();
-    let status = kube_server.get_server_status().await?;
+    let status = server.query_status().await?;
     tracing::info!(status = ?status, "status request");
     match status {
         ServerDeploymentStatus::Connectable(mut server_stream) => {
-            return kube_server
+            return server
                 .proxy_status(handshake, &client_packet, client_stream, &mut server_stream)
                 .await
         }
@@ -165,14 +161,13 @@ async fn handle_status(
     Ok(())
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = kube_server.get_server_addr()),skip(client_stream, handshake, kube_server,cache))]
+#[tracing::instrument(level = "info", fields(server_addr = server.get_addr()),skip(client_stream, handshake, server))]
 async fn handle_login(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
-    kube_server: KubeServer,
-    cache: Arc<Mutex<Cache>>,
+    server: impl MinecraftServerHandle,
 ) -> Result<(), OpaqueError> {
-    match kube_server.get_server_status().await? {
+    match server.query_status().await? {
         ServerDeploymentStatus::Connectable(mut server_stream) => {
             // referenced from:
             // https://github.com/hanyu-dev/tokio-splice2/blob/fc47199fffde8946b0acf867d1fa0b2222267a34/examples/proxy.rs
@@ -206,10 +201,7 @@ async fn handle_login(
             mc_server::send_disconnect(client_stream, "Starting...§d<3§r").await?;
         }
         ServerDeploymentStatus::Offline => {
-            kube_server
-                .set_scale(cache, 1)
-                .map_err(|e| format!("Failed to set depoloyment scale: err = {:?}", e))
-                .await?;
+            server.start().await?;
             mc_server::send_disconnect(client_stream, "Okayy_starting_it...§d<3§r").await?;
         }
     }

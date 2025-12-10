@@ -86,7 +86,7 @@ impl From<crate::packets::ParseErrorTrace> for OpaqueError {
     fn from(value: crate::packets::ParseErrorTrace) -> Self {
         Self {
             span_trace: value.context,
-            context: format!("packet parse error: {:?}", value.inner),
+            context: format!("{:?}", value.inner),
         }
     }
 }

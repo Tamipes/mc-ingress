@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Service};
 use kube::{
@@ -7,44 +7,49 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use serde_json::json;
-use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::{
-    kube_cache,
-    packets::{serverbound::handshake::Handshake, Packet, SendPacket},
+    mc_server::{MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus},
     OpaqueError,
 };
 
-#[derive(Debug)]
-pub struct Cache {
+/// This is the layer who is respinsible for caching requests.
+///
+/// TODO:
+/// It should be also clone-able freely, because it deals with
+/// the underlying async data access.
+#[derive(Debug, Clone)]
+pub struct KubeCache {
     deployments: Api<Deployment>,
     services: Api<Service>,
 }
-impl Cache {
-    pub fn create() -> Option<Cache> {
+impl KubeCache {
+    /// This initializes the creation of a "kubernetes client"
+    /// and if it is not possible returns a None.
+    pub fn create() -> Option<KubeCache> {
         let kubeconfig = kube::config::Kubeconfig::read().unwrap();
         let client = Client::try_from(kubeconfig).unwrap();
 
         let deployments: Api<Deployment> = Api::default_namespaced(client.clone());
         let services: Api<Service> = Api::default_namespaced(client);
 
-        return Some(Cache {
+        return Some(KubeCache {
             deployments,
             services,
         });
     }
-    pub async fn get_dep(&self, name: &str) -> Result<Deployment, kube::Error> {
+    async fn get_dep(&self, name: &str) -> Result<Deployment, kube::Error> {
         self.deployments.get(name).await
     }
-    pub async fn get_srv(&self, name: &str) -> Result<Service, kube::Error> {
+    async fn get_srv(&self, name: &str) -> Result<Service, kube::Error> {
         self.services.get(name).await
     }
-    pub async fn get_deploys(&self) -> ObjectList<Deployment> {
+    async fn get_deploys(&self) -> ObjectList<Deployment> {
         // let lp: ListParams = ListParams::default();
         let lp: ListParams = ListParams::default().labels("tami.moe/minecraft");
         self.deployments.list(&lp).await.unwrap()
     }
-    pub async fn get_srvs(&self) -> ObjectList<Service> {
+    async fn get_srvs(&self) -> ObjectList<Service> {
         // let lp: ListParams = ListParams::default();
         let lp: ListParams = ListParams::default().labels("tami.moe/minecraft");
         self.services.list(&lp).await.unwrap()
@@ -62,19 +67,76 @@ impl Cache {
         Some(result.name()?.to_string())
     }
 
-    pub async fn set_dep_scale(&self, name: &str, num: i32) -> Result<Deployment, kube::Error> {
+    async fn set_dep_scale(&self, name: &str, num: i32) -> Result<Deployment, kube::Error> {
         let patch = Patch::Merge(json!({"spec":{"replicas": num}}));
         let pp = PatchParams::default();
         self.deployments.patch(name, &pp, &patch).await
     }
 }
 
-pub struct KubeServer {
+#[derive(Clone)]
+pub struct McApi {
+    cache: KubeCache,
+}
+
+impl MinecraftAPI<Server> for McApi {
+    #[tracing::instrument(name = "MinecraftAPI::query_server", level = "info", skip(self))]
+    async fn query_server(&self, addr: String) -> Result<Server, OpaqueError> {
+        let dep_name = match self.cache.query_dep_addr(&addr).await {
+            Some(x) => x,
+            None => {
+                return Err(OpaqueError::create(&format!(
+                    "Failed to find deployment name by addr"
+                )))
+            }
+        };
+        let srv_name = match self.cache.query_srv_addr(&addr).await {
+            Some(x) => x,
+            None => {
+                return Err(OpaqueError::create(&format!(
+                    "Failed to find service name by addr"
+                )))
+            }
+        };
+
+        let deployment = self.cache.get_dep(&dep_name).await.map_err(|x| {
+            format!(
+                "Failed to query cache for deployment with dep_name err:{}",
+                x.to_string()
+            )
+        })?;
+        let service = self.cache.get_srv(&srv_name).await.map_err(|x| {
+            format!(
+                "Failed to query cache for service with dep_name err:{}",
+                x.to_string()
+            )
+        })?;
+        tracing::debug!("found kubernetes deployment & service");
+
+        return Ok(Server {
+            dep: deployment,
+            srv: service,
+            server_addr: addr.to_string(),
+            cache: self.cache.clone(),
+        });
+    }
+}
+
+impl McApi {
+    pub fn create() -> Option<Self> {
+        Some(Self {
+            cache: KubeCache::create()?,
+        })
+    }
+}
+
+pub struct Server {
     dep: Deployment,
     srv: Service,
     server_addr: String,
+    cache: KubeCache,
 }
-impl fmt::Debug for KubeServer {
+impl fmt::Debug for Server {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KubeServer")
             .field(
@@ -99,62 +161,21 @@ impl fmt::Debug for KubeServer {
             .finish()
     }
 }
-impl KubeServer {
-    #[tracing::instrument(name = "KubeServer::create", level = "info", skip(cache))]
-    pub async fn create(
-        cache: Arc<Mutex<kube_cache::Cache>>,
-        server_addr: &str,
-    ) -> Result<Self, OpaqueError> {
-        let cache_guard = cache.lock().await;
-        let dep_name = match cache_guard.query_dep_addr(server_addr).await {
-            Some(x) => x,
-            None => {
-                return Err(OpaqueError::create(&format!(
-                    "Failed to find deployment name by addr"
-                )))
-            }
-        };
-        let srv_name = match cache_guard.query_srv_addr(server_addr).await {
-            Some(x) => x,
-            None => {
-                return Err(OpaqueError::create(&format!(
-                    "Failed to find service name by addr"
-                )))
-            }
-        };
+impl MinecraftServerHandle for Server {
+    async fn start(&self) -> Result<(), OpaqueError> {
+        self.set_scale(1).await.map_err(|e| {
+            OpaqueError::create(&format!("failed to set deployment scale: err = {:?}", e))
+        })
+    }
 
-        let deployment = cache_guard.get_dep(&dep_name).await.map_err(|x| {
-            format!(
-                "Failed to query cache for deployment with dep_name err:{}",
-                x.to_string()
-            )
-        })?;
-        let service = cache_guard.get_srv(&srv_name).await.map_err(|x| {
-            format!(
-                "Failed to query cache for service with dep_name err:{}",
-                x.to_string()
-            )
-        })?;
-        drop(cache_guard);
-        tracing::debug!("found kubernetes deployment & service");
+    async fn stop(&self) -> Result<(), OpaqueError> {
+        self.set_scale(1).await.map_err(|e| {
+            OpaqueError::create(&format!("failed to set deployment scale: err = {:?}", e))
+        })
+    }
 
-        return Ok(Self {
-            dep: deployment,
-            srv: service,
-            server_addr: server_addr.to_string(),
-        });
-    }
-    pub fn get_port(&self) -> Option<i32> {
-        let a = self.srv.clone().spec.unwrap().ports.unwrap();
-        let port = a.iter().find(|x| x.name.clone().unwrap() == "mc-router")?;
-        port.node_port
-    }
     #[tracing::instrument(level = "info")]
-    pub fn get_server_addr(&self) -> String {
-        self.server_addr.clone()
-    }
-    #[tracing::instrument(level = "info")]
-    pub async fn get_server_status(&self) -> Result<ServerDeploymentStatus, OpaqueError> {
+    async fn query_status(&self) -> Result<crate::mc_server::ServerDeploymentStatus, OpaqueError> {
         let mut status = match self.dep.clone().status {
             Some(x) => x,
             None => {
@@ -198,63 +219,31 @@ impl KubeServer {
             return Ok(ServerDeploymentStatus::Offline);
         }
     }
-    async fn query_server_connectable(&self) -> Result<TcpStream, OpaqueError> {
-        let port = self
-            .get_port()
-            .ok_or_else(|| "failed to get port from service")?;
-        let server_stream = TcpStream::connect(format!("localhost:{port}"))
-            .await
-            .map_err(|_| "failed to connect to minecraft server")?;
 
-        tracing::trace!(
-            "successfully connected to backend server; (connectibility check) {:?}",
-            server_stream.peer_addr()
-        );
-        Ok(server_stream)
+    fn get_internal_address(&self) -> Option<String> {
+        let a = self.srv.clone().spec.unwrap().ports.unwrap();
+        let port = a.iter().find(|x| x.name.clone().unwrap() == "mc-router")?;
+        Some(format!("localhost:{}", port.node_port?))
     }
-    pub async fn proxy_status(
-        &self,
-        handshake: &Handshake,
-        status_request: &Packet,
-        client_stream: &mut TcpStream,
-        server_stream: &mut TcpStream,
-    ) -> Result<(), OpaqueError> {
-        handshake
-            .send_packet(server_stream)
-            .await
-            .map_err(|_| "failed to forward handshake packet to minecraft server")?;
-        status_request
-            .send_packet(server_stream)
-            .await
-            .map_err(|_| "failed to forward status request packet to minecraft server")?;
 
-        let data_amount = tokio::io::copy_bidirectional(client_stream, server_stream)
-            .await
-            .map_err(|e| {
-                format!(
-                    "error during bidirectional copy between server and client; err={:?}",
-                    e
-                )
-            })?;
-        tracing::trace!("data exchanged while proxying status: {:?}", data_amount);
-        Ok(())
+    fn get_addr(&self) -> Option<String> {
+        Some(self.server_addr.clone())
     }
-    pub async fn set_scale(
-        &self,
-        cache: Arc<Mutex<Cache>>,
-        num: i32,
-    ) -> Result<Deployment, kube::Error> {
+}
+
+impl Server {
+    async fn set_scale(&self, num: i32) -> Result<(), kube::Error> {
         let name = self
             .srv
             .metadata
             .clone()
             .name
             .unwrap_or("#error#".to_string());
-        let res = cache.lock().await.set_dep_scale(&name, num).await;
+        let res = self.cache.set_dep_scale(&name, num).await;
         if res.is_ok() {
             tracing::info!("scaled replicas of {} to {num}", self.server_addr);
         }
-        return res;
+        Ok(())
     }
 }
 
@@ -265,12 +254,6 @@ where
     dep.labels().values().filter(|x| x.as_str() == str).count() > 0
 }
 
-pub enum ServerDeploymentStatus {
-    Connectable(TcpStream),
-    Starting,
-    PodOk,
-    Offline,
-}
 impl fmt::Debug for ServerDeploymentStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -279,5 +262,10 @@ impl fmt::Debug for ServerDeploymentStatus {
             Self::PodOk => write!(f, "PodOk"),
             Self::Offline => write!(f, "Offline"),
         }
+    }
+}
+impl From<kube::Error> for OpaqueError {
+    fn from(value: kube::Error) -> Self {
+        OpaqueError::create(value.to_string().as_str())
     }
 }

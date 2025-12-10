@@ -1,2 +1,2 @@
 # Env variables:
-- BIND_PORT(default: 25565): the port the server should bind to
+- BIND_ADDR(default: 0.0.0.0:25565): the address the server should bind to
