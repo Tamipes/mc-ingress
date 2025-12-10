@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{prelude::*, EnvFilter};
@@ -100,7 +101,7 @@ async fn process_connection<T: MinecraftServerHandle>(
             handle_status(&mut client_stream, &handshake, server).await?;
         }
         packets::ProtocolState::Login => {
-            handle_login(&mut client_stream, &handshake, server).await?
+            handle_login(&mut client_stream, &handshake, server, api).await?
         }
         packets::ProtocolState::Transfer => {
             return Err(OpaqueError::create(
@@ -161,11 +162,12 @@ async fn handle_status(
     Ok(())
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = server.get_addr()),skip(client_stream, handshake, server))]
-async fn handle_login(
+#[tracing::instrument(level = "info", fields(server_addr = server.get_addr()),skip(client_stream, handshake, server, api))]
+async fn handle_login<T>(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
     server: impl MinecraftServerHandle,
+    api: impl MinecraftAPI<T>,
 ) -> Result<(), OpaqueError> {
     match server.query_status().await? {
         ServerDeploymentStatus::Connectable(mut server_stream) => {
@@ -202,6 +204,8 @@ async fn handle_login(
         }
         ServerDeploymentStatus::Offline => {
             server.start().await?;
+            api.start_watch(server.clone(), Duration::from_secs(600))
+                .await?;
             mc_server::send_disconnect(client_stream, "Okayy_starting_it...§d<3§r").await?;
         }
     }

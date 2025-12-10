@@ -1,7 +1,13 @@
+use std::fmt;
+
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
-    packets::{serverbound::handshake::Handshake, Packet, SendPacket},
+    packets::{
+        clientbound::status::{StatusStructNew, StatusTrait},
+        serverbound::handshake::Handshake,
+        Packet, SendPacket,
+    },
     OpaqueError,
 };
 
@@ -44,7 +50,7 @@ pub async fn send_disconnect(
     Ok(())
 }
 
-pub trait MinecraftServerHandle {
+pub trait MinecraftServerHandle: Clone {
     async fn start(&self) -> Result<(), OpaqueError>;
     async fn stop(&self) -> Result<(), OpaqueError>;
     async fn query_status(&self) -> Result<ServerDeploymentStatus, OpaqueError>;
@@ -95,10 +101,20 @@ pub trait MinecraftServerHandle {
         tracing::trace!("data exchanged while proxying status: {:?}", data_amount);
         Ok(())
     }
+    // TODO: move the implementation to here, but
+    // the async things are *strange* in rust
+    fn query_description(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Box<dyn StatusTrait>, OpaqueError>> + Send;
 }
 
 pub trait MinecraftAPI<T> {
     async fn query_server(&self, addr: String) -> Result<T, OpaqueError>;
+    async fn start_watch(
+        self,
+        server: impl MinecraftServerHandle,
+        frequency: std::time::Duration,
+    ) -> Result<(), OpaqueError>;
 }
 
 pub enum ServerDeploymentStatus {
