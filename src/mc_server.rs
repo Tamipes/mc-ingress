@@ -52,10 +52,10 @@ pub trait MinecraftServerHandle {
     fn get_addr(&self) -> Option<String>;
 
     async fn query_server_connectable(&self) -> Result<TcpStream, OpaqueError> {
-        let port = self
+        let address = self
             .get_internal_address()
             .ok_or_else(|| "failed to get internal address from server")?;
-        let server_stream = TcpStream::connect(port)
+        let server_stream = TcpStream::connect(address)
             .await
             .map_err(|_| "failed to connect to minecraft server")?;
 
