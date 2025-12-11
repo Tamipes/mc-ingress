@@ -83,7 +83,7 @@ pub struct McApi {
 }
 
 impl MinecraftAPI<Server> for McApi {
-    #[tracing::instrument(name = "MinecraftAPI::query_server", level = "info", skip(self))]
+    #[tracing::instrument(name = "MinecraftAPI::query_server", level = "info", skip(self, addr))]
     async fn query_server(&self, addr: &str) -> Result<Server, OpaqueError> {
         let dep_name = match self.cache.query_dep_addr(&addr).await {
             Some(x) => x,
