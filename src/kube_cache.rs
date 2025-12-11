@@ -339,6 +339,29 @@ impl MinecraftServerHandle for Server {
         let port = a.iter().find(|x| x.name.clone().unwrap() == "mc-router")?;
         port.node_port.map(|x| x.to_string())
     }
+
+    fn get_motd(&self) -> Option<String> {
+        let all_container_motds = self
+            .dep
+            .spec
+            .clone()?
+            .template
+            .spec?
+            .containers
+            .iter()
+            .map(|cont| match cont.env.clone() {
+                Some(es) => es
+                    .iter()
+                    .filter(|e| e.name.as_str() == "MOTD")
+                    .map(|x| x.value.clone())
+                    .collect::<Vec<Option<String>>>()
+                    .first()?
+                    .clone(),
+                None => None,
+            })
+            .collect::<Vec<Option<String>>>();
+        all_container_motds.first()?.clone()
+    }
 }
 
 impl Server {

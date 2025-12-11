@@ -69,6 +69,7 @@ pub trait MinecraftServerHandle: Clone {
     fn get_internal_address(&self) -> Option<String>;
     fn get_addr(&self) -> Option<String>;
     fn get_port(&self) -> Option<String>;
+    fn get_motd(&self) -> Option<String>;
 
     async fn query_server_connectable(&self) -> Result<TcpStream, OpaqueError> {
         let address = self

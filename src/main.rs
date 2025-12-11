@@ -142,7 +142,7 @@ async fn handle_status<T: MinecraftServerHandle>(
             status_struct.players.max = 0;
             status_struct.players.online = 0;
             status_struct.description.text = format!(
-                "Could not find §kserver§r: §f§o{server_addr}§r\nMinecraft Ingress{bye_message}"
+                "Could not find §kserver§r: §f§o{server_addr}§r\nMinecraft Ingress    {bye_message}"
             );
 
             mc_server::complete_status_request(client_stream, status_struct).await?;
@@ -159,9 +159,13 @@ async fn handle_status<T: MinecraftServerHandle>(
             return Ok(());
         }
     };
-    tracing::debug!("kube server status: {:?}", server.query_status().await?);
     let status = server.query_status().await?;
     tracing::info!(status = ?status, "status request");
+    let motd = server
+        .get_motd()
+        .unwrap_or("A minecraft server (proxy motd)".to_string());
+
+    tracing::trace!(motd);
     match status {
         ServerDeploymentStatus::Connectable(mut server_stream) => {
             return server
@@ -171,13 +175,13 @@ async fn handle_status<T: MinecraftServerHandle>(
         ServerDeploymentStatus::Starting | ServerDeploymentStatus::PodOk => {
             status_struct.players.max = 1;
             status_struct.players.online = 1;
-            status_struct.description.text = format!("\n§2Server is starting...§r{bye_message}");
+            status_struct.description.text =
+                format!("{motd}\n§2Starting!§r §b§oWait a bit§r§b^^§r{bye_message}");
         }
         ServerDeploymentStatus::Offline => {
             status_struct.players.max = 1;
-            status_struct.description.text = format!(
-                "Server is currently §onot§r running. \n§aJoin to start it!§r    {bye_message}"
-            );
+            status_struct.description.text =
+                format!("{motd}\n§4Offline§r §2§oJoin to start!§r{bye_message}");
         }
     };
 
