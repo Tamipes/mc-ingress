@@ -11,7 +11,11 @@ use tracing::Instrument;
 
 use crate::{
     mc_server::{MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus},
-    packets::{clientbound::status::StatusTrait, SendPacket},
+    packets::{
+        clientbound::status::StatusTrait,
+        serverbound::handshake::{self},
+        SendPacket,
+    },
     OpaqueError,
 };
 
@@ -57,15 +61,15 @@ impl KubeCache {
         self.services.list(&lp).await.unwrap()
     }
 
-    pub async fn query_dep_addr(&self, addr: &str) -> Option<String> {
+    pub async fn query_dep_addr(&self, addr: &str, port: &str) -> Option<String> {
         let deploys = self.get_deploys().await;
-        let result = deploys.iter().find(|x| filter_label_value(x, addr))?;
+        let result = deploys.iter().find(|x| filter_label_value(x, addr, port))?;
         Some(result.name()?.to_string())
     }
 
-    pub async fn query_srv_addr(&self, addr: &str) -> Option<String> {
+    pub async fn query_srv_addr(&self, addr: &str, port: &str) -> Option<String> {
         let deploys = self.get_srvs().await;
-        let result = deploys.iter().find(|x| filter_label_value(x, addr))?;
+        let result = deploys.iter().find(|x| filter_label_value(x, addr, port))?;
         Some(result.name()?.to_string())
     }
 
@@ -83,9 +87,15 @@ pub struct McApi {
 }
 
 impl MinecraftAPI<Server> for McApi {
-    #[tracing::instrument(name = "MinecraftAPI::query_server", level = "info", skip(self, addr))]
-    async fn query_server(&self, addr: &str) -> Result<Server, OpaqueError> {
-        let dep_name = match self.cache.query_dep_addr(&addr).await {
+    #[tracing::instrument(
+        name = "MinecraftAPI::query_server",
+        level = "info",
+        skip(self, addr, port)
+    )]
+    async fn query_server(&self, addr: &str, port: &str) -> Result<Server, OpaqueError> {
+        let addr = sanitize_addr(&addr);
+
+        let dep_name = match self.cache.query_dep_addr(&addr, &port).await {
             Some(x) => x,
             None => {
                 return Err(OpaqueError::create(&format!(
@@ -93,7 +103,7 @@ impl MinecraftAPI<Server> for McApi {
                 )))
             }
         };
-        let srv_name = match self.cache.query_srv_addr(&addr).await {
+        let srv_name = match self.cache.query_srv_addr(&addr, &port).await {
             Some(x) => x,
             None => {
                 return Err(OpaqueError::create(&format!(
@@ -130,6 +140,7 @@ impl MinecraftAPI<Server> for McApi {
         frequency: Duration,
     ) -> Result<(), OpaqueError> {
         let addr = server.get_addr().ok_or("could not get addr of server")?;
+        let port = server.get_port().ok_or("could not get port of server")?;
         if self.map.lock().await.get(&addr).is_none() {
             let span = tracing::span!(parent: None,tracing::Level::INFO, "server_watcher", addr);
 
@@ -137,7 +148,7 @@ impl MinecraftAPI<Server> for McApi {
                 async move {
                     tracing::info!("starting watch");
                     tokio::time::sleep(frequency).await;
-                    let server = self.query_server(&addr).await.unwrap();
+                    let server = self.query_server(&addr, &port).await.unwrap();
                     let status_json = match server.query_description().await {
                         Ok(x) => x,
                         Err(e) => {
@@ -274,9 +285,7 @@ impl MinecraftServerHandle for Server {
     }
 
     fn get_internal_address(&self) -> Option<String> {
-        let a = self.srv.clone().spec.unwrap().ports.unwrap();
-        let port = a.iter().find(|x| x.name.clone().unwrap() == "mc-router")?;
-        Some(format!("localhost:{}", port.node_port?))
+        Some(format!("localhost:{}", self.get_port()?))
     }
 
     fn get_addr(&self) -> Option<String> {
@@ -324,6 +333,12 @@ impl MinecraftServerHandle for Server {
             }
         }
     }
+
+    fn get_port(&self) -> Option<String> {
+        let a = self.srv.clone().spec.unwrap().ports.unwrap();
+        let port = a.iter().find(|x| x.name.clone().unwrap() == "mc-router")?;
+        port.node_port.map(|x| x.to_string())
+    }
 }
 
 impl Server {
@@ -342,11 +357,23 @@ impl Server {
     }
 }
 
-fn filter_label_value<R>(dep: &&R, str: &str) -> bool
+fn filter_label_value<R>(res: &&R, addr: &str, port: &str) -> bool
 where
     R: ResourceExt,
 {
-    dep.labels().values().filter(|x| x.as_str() == str).count() > 0
+    let mut found_port = false;
+    res.labels()
+        .iter()
+        .filter(|(key, value)| match key.as_str() {
+            "tami.moe/minecraft" => value.as_str() == addr,
+            "tami.moe/minecraft-port" => {
+                found_port = true;
+                value.as_str() == port
+            }
+            _ => false,
+        })
+        .count()
+        > 0
 }
 
 impl fmt::Debug for ServerDeploymentStatus {
@@ -363,4 +390,35 @@ impl From<kube::Error> for OpaqueError {
     fn from(value: kube::Error) -> Self {
         OpaqueError::create(value.to_string().as_str())
     }
+}
+
+fn terminate_at_null(str: &str) -> &str {
+    match str.split('\0').next() {
+        Some(x) => x,
+        None => str,
+    }
+}
+
+fn sanitize_addr(addr: &str) -> &str {
+    // Thanks to a buggy minecraft, when the client sends a join
+    // from a SRV DNS record, it will not use the address typed
+    // in the game, but use the address redicted *to* by the
+    // DNS record as the address for joining, plus a trailing "."
+    //
+    // For example:
+    // server.example.com (_minecraft._tcp.server.example.com)
+    // (the typed address)     I (the DNS SRV record which gets read)
+    //                         V
+    //            5 25565 server.example.com
+    //                         I (the response for the DNS SRV query)
+    //                         V
+    //                server.example.com.
+    //         (the address used in the protocol)
+    let addr = addr.trim_end_matches(".");
+
+    // Modded minecraft clients send null terminated strings,
+    // after which they have extra data. This just removes them
+    // from the addr lookup
+    let addr = terminate_at_null(addr);
+    addr
 }

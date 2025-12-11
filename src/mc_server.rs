@@ -1,12 +1,9 @@
-use std::fmt;
-
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
-    mc_server,
     packets::{
         clientbound::status::{StatusStructNew, StatusTrait},
-        serverbound::handshake::Handshake,
+        serverbound::handshake::{self, Handshake},
         Packet, SendPacket,
     },
     OpaqueError,
@@ -71,6 +68,7 @@ pub trait MinecraftServerHandle: Clone {
     async fn query_status(&self) -> Result<ServerDeploymentStatus, OpaqueError>;
     fn get_internal_address(&self) -> Option<String>;
     fn get_addr(&self) -> Option<String>;
+    fn get_port(&self) -> Option<String>;
 
     async fn query_server_connectable(&self) -> Result<TcpStream, OpaqueError> {
         let address = self
@@ -124,7 +122,7 @@ pub trait MinecraftServerHandle: Clone {
 }
 
 pub trait MinecraftAPI<T> {
-    async fn query_server(&self, addr: &str) -> Result<T, OpaqueError>;
+    async fn query_server(&self, addr: &str, port: &str) -> Result<T, OpaqueError>;
     async fn start_watch(
         self,
         server: impl MinecraftServerHandle,

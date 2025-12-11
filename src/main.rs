@@ -109,7 +109,7 @@ async fn process_connection<T: MinecraftServerHandle>(
     Ok(())
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address()),skip(client_stream, handshake, api))]
+#[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address(),server_port = handshake.server_port.get_value()),skip(client_stream, handshake, api))]
 async fn handle_status<T: MinecraftServerHandle>(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
@@ -124,13 +124,18 @@ async fn handle_status<T: MinecraftServerHandle>(
     };
 
     let server_addr = handshake.get_server_address();
-    let server_addr = sanitize_addr(&server_addr);
     let commit_hash: &'static str = env!("COMMIT_HASH");
     let mut status_struct = StatusStructNew::create();
     status_struct.version.protocol = handshake.protocol_version.get_int();
     let bye_message = format!(" - §dTami§r with §d<3§r §8(rev: {commit_hash})§r");
 
-    let server = match api.query_server(server_addr).await {
+    let server = match api
+        .query_server(
+            &handshake.get_server_address(),
+            &handshake.server_port.get_value().to_string(),
+        )
+        .await
+    {
         Ok(x) => x,
         Err(e) => {
             tracing::warn!(err = e.context);
@@ -166,8 +171,7 @@ async fn handle_status<T: MinecraftServerHandle>(
         ServerDeploymentStatus::Starting | ServerDeploymentStatus::PodOk => {
             status_struct.players.max = 1;
             status_struct.players.online = 1;
-            status_struct.description.text =
-                format!("§aServer is starting...§r please wait\n{bye_message}");
+            status_struct.description.text = format!("\n§2Server is starting...§r{bye_message}");
         }
         ServerDeploymentStatus::Offline => {
             status_struct.players.max = 1;
@@ -181,14 +185,17 @@ async fn handle_status<T: MinecraftServerHandle>(
     return mc_server::handle_ping(client_stream).await;
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address()),skip(client_stream, handshake, api))]
+#[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address(),server_port = handshake.server_port.get_value()),skip(client_stream, handshake, api))]
 async fn handle_login<T: MinecraftServerHandle>(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
     api: impl MinecraftAPI<T>,
 ) -> Result<(), OpaqueError> {
     let server = api
-        .query_server(sanitize_addr(&handshake.get_server_address()))
+        .query_server(
+            &handshake.get_server_address(),
+            &handshake.server_port.get_value().to_string(),
+        )
         .await?;
 
     let status = server.query_status().await?;
@@ -234,35 +241,4 @@ async fn handle_login<T: MinecraftServerHandle>(
         }
     }
     Ok(())
-}
-
-fn terminate_at_null(str: &str) -> &str {
-    match str.split('\0').next() {
-        Some(x) => x,
-        None => str,
-    }
-}
-
-fn sanitize_addr(addr: &str) -> &str {
-    // Thanks to a buggy minecraft, when the client sends a join
-    // from a SRV DNS record, it will not use the address typed
-    // in the game, but use the address redicted *to* by the
-    // DNS record as the address for joining, plus a trailing "."
-    //
-    // For example:
-    // server.example.com (_minecraft._tcp.server.example.com)
-    // (the typed address)     I (the DNS SRV record which gets read)
-    //                         V
-    //            5 25565 server.example.com
-    //                         I (the response for the DNS SRV query)
-    //                         V
-    //                server.example.com.
-    //         (the address used in the protocol)
-    let addr = addr.trim_end_matches(".");
-
-    // Modded minecraft clients send null terminated strings,
-    // after which they have extra data. This just removes them
-    // from the addr lookup
-    let addr = terminate_at_null(addr);
-    addr
 }
