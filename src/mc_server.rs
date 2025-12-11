@@ -39,8 +39,6 @@ pub async fn complete_status_request(
         .send_packet(client_stream)
         .await
         .map_err(|_| "Failed to send status packet")?;
-
-    mc_server::handle_ping(client_stream).await?;
     Ok(())
 }
 

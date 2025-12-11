@@ -5,9 +5,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use crate::mc_server::{
-    complete_status_request, MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus,
-};
+use crate::mc_server::{MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus};
 use crate::opaque_error::OpaqueError;
 use crate::packets::clientbound::status::StatusStructNew;
 use crate::packets::serverbound::handshake::Handshake;
@@ -141,7 +139,18 @@ async fn handle_status<T: MinecraftServerHandle>(
                 "Could not find §kserver§r: §f§o{server_addr}§r\nMinecraft Ingress{bye_message}"
             );
 
-            return complete_status_request(client_stream, status_struct).await;
+            mc_server::complete_status_request(client_stream, status_struct).await?;
+
+            // Recieve the ping packet, so the client does not send it again
+            let _ping = Packet::parse(client_stream).await?;
+            // Send a bad ping packet back, so the client shows *searching* icon
+            let _pong = Packet::new(9, vec![0; 8])
+                .ok_or("failed to create empty pong packet?")?
+                .send_packet(client_stream)
+                .await
+                .map_err(|_| "failed to send pong packet")?;
+
+            return Ok(());
         }
     };
     tracing::debug!("kube server status: {:?}", server.query_status().await?);
@@ -162,12 +171,13 @@ async fn handle_status<T: MinecraftServerHandle>(
         ServerDeploymentStatus::Offline => {
             status_struct.players.max = 1;
             status_struct.description.text = format!(
-                "Server is currently §onot§r running. \n§aJoin to start it!§r   {bye_message}"
+                "Server is currently §onot§r running. \n§aJoin to start it!§r    {bye_message}"
             );
         }
     };
 
-    return complete_status_request(client_stream, status_struct).await;
+    mc_server::complete_status_request(client_stream, status_struct).await?;
+    return mc_server::handle_ping(client_stream).await;
 }
 
 #[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address()),skip(client_stream, handshake, api))]
