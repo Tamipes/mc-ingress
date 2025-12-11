@@ -129,7 +129,7 @@ async fn handle_status<T: MinecraftServerHandle>(
     status_struct.version.protocol = handshake.protocol_version.get_int();
     let bye_message = format!(" - §dTami§r with §d<3§r §8(rev: {commit_hash})§r");
 
-    let server = match api.query_server(handshake.get_server_address()).await {
+    let server = match api.query_server(&handshake.get_server_address()).await {
         Ok(x) => x,
         Err(e) => {
             tracing::warn!(err = e.context);
@@ -186,7 +186,23 @@ async fn handle_login<T: MinecraftServerHandle>(
     handshake: &Handshake,
     api: impl MinecraftAPI<T>,
 ) -> Result<(), OpaqueError> {
-    let server = api.query_server(handshake.get_server_address()).await?;
+    let addr = handshake.get_server_address();
+    // Thanks to a buggy minecraft, when the client sends a join
+    // from a SRV DNS record, it will not use the address typed
+    // in the game, but use the address redicted *to* by the
+    // DNS record as the address for joining, plus a trailing "."
+    //
+    // For example:
+    // server.example.com (_minecraft._tcp.server.example.com)
+    // (the typed address)     I (the DNS SRV record which gets read)
+    //                         V
+    //            5 25565 server.example.com
+    //                         I (the response for the DNS SRV query)
+    //                         V
+    //                server.example.com.
+    //         (the address used in the protocol)
+    let server = api.query_server(addr.trim_end_matches(".")).await?;
+
     let status = server.query_status().await?;
     tracing::debug!(msg = "server status", status = ?status);
     match status {

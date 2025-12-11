@@ -124,7 +124,7 @@ pub trait MinecraftServerHandle: Clone {
 }
 
 pub trait MinecraftAPI<T> {
-    async fn query_server(&self, addr: String) -> Result<T, OpaqueError>;
+    async fn query_server(&self, addr: &str) -> Result<T, OpaqueError>;
     async fn start_watch(
         self,
         server: impl MinecraftServerHandle,

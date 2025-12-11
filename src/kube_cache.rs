@@ -84,7 +84,7 @@ pub struct McApi {
 
 impl MinecraftAPI<Server> for McApi {
     #[tracing::instrument(name = "MinecraftAPI::query_server", level = "info", skip(self))]
-    async fn query_server(&self, addr: String) -> Result<Server, OpaqueError> {
+    async fn query_server(&self, addr: &str) -> Result<Server, OpaqueError> {
         let dep_name = match self.cache.query_dep_addr(&addr).await {
             Some(x) => x,
             None => {
@@ -137,7 +137,7 @@ impl MinecraftAPI<Server> for McApi {
                 async move {
                     tracing::info!("starting watch");
                     tokio::time::sleep(frequency).await;
-                    let server = self.query_server(addr.clone()).await.unwrap();
+                    let server = self.query_server(&addr).await.unwrap();
                     let status_json = match server.query_description().await {
                         Ok(x) => x,
                         Err(e) => {
