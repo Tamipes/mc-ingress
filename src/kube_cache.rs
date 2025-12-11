@@ -151,9 +151,11 @@ impl MinecraftAPI<Server> for McApi {
                     if status_json.get_players_online() == 0 {
                         // With this I don't need to specify that StatusTrait
                         // should be send as well.
+
                         // Otherwise I would need to have it be defined as:
                         // trait StatusTrait: Send { ... }
                         drop(status_json);
+
                         if let Err(err) = server.stop().await {
                             tracing::error!(
                                 trace = err.get_span_trace(),

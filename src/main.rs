@@ -5,7 +5,9 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use crate::mc_server::{MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus};
+use crate::mc_server::{
+    complete_status_request, MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus,
+};
 use crate::opaque_error::OpaqueError;
 use crate::packets::clientbound::status::StatusStructNew;
 use crate::packets::serverbound::handshake::Handshake;
@@ -93,16 +95,11 @@ async fn process_connection<T: MinecraftServerHandle>(
 
     next_server_state = handshake.get_next_state();
 
-    let server = api.query_server(handshake.get_server_address()).await?;
-    tracing::debug!("kube server status: {:?}", server.query_status().await?);
-
     match next_server_state {
         packets::ProtocolState::Status => {
-            handle_status(&mut client_stream, &handshake, server).await?;
+            handle_status(&mut client_stream, &handshake, api).await?;
         }
-        packets::ProtocolState::Login => {
-            handle_login(&mut client_stream, &handshake, server, api).await?
-        }
+        packets::ProtocolState::Login => handle_login(&mut client_stream, &handshake, api).await?,
         packets::ProtocolState::Transfer => {
             return Err(OpaqueError::create(
                 "next state is transfer; Not yet implemented!",
@@ -114,13 +111,12 @@ async fn process_connection<T: MinecraftServerHandle>(
     Ok(())
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = server.get_addr()),skip(client_stream, handshake, server))]
-async fn handle_status(
+#[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address()),skip(client_stream, handshake, api))]
+async fn handle_status<T: MinecraftServerHandle>(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
-    server: impl MinecraftServerHandle,
+    api: impl MinecraftAPI<T>,
 ) -> Result<(), OpaqueError> {
-    tracing::debug!(handshake = ?handshake);
     let client_packet = Packet::parse(client_stream).await?;
     if client_packet.id.get_int() != 0 {
         return Err(OpaqueError::create(&format!(
@@ -129,9 +125,26 @@ async fn handle_status(
         )));
     };
 
+    let server_addr = handshake.get_server_address();
     let commit_hash: &'static str = env!("COMMIT_HASH");
     let mut status_struct = StatusStructNew::create();
     status_struct.version.protocol = handshake.protocol_version.get_int();
+    let bye_message = format!(" - §dTami§r with §d<3§r §8(rev: {commit_hash})§r");
+
+    let server = match api.query_server(handshake.get_server_address()).await {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::warn!(err = e.context);
+            status_struct.players.max = 0;
+            status_struct.players.online = 0;
+            status_struct.description.text = format!(
+                "Could not find §kserver§r: §f§o{server_addr}§r\nMinecraft Ingress{bye_message}"
+            );
+
+            return complete_status_request(client_stream, status_struct).await;
+        }
+    };
+    tracing::debug!("kube server status: {:?}", server.query_status().await?);
     let status = server.query_status().await?;
     tracing::info!(status = ?status, "status request");
     match status {
@@ -143,33 +156,30 @@ async fn handle_status(
         ServerDeploymentStatus::Starting | ServerDeploymentStatus::PodOk => {
             status_struct.players.max = 1;
             status_struct.players.online = 1;
-            status_struct.description.text = format!("§aServer is starting...§r please wait\n - §dTami§r with §d<3§r §8(rev: {commit_hash})§r");
+            status_struct.description.text =
+                format!("§aServer is starting...§r please wait\n{bye_message}");
         }
         ServerDeploymentStatus::Offline => {
             status_struct.players.max = 1;
-            status_struct.description.text = format!("Server is currently §onot§r running. \n§aJoin to start it!§r - §dTami§r with §d<3§r §8(rev: {commit_hash})§r");
+            status_struct.description.text = format!(
+                "Server is currently §onot§r running. \n§aJoin to start it!§r   {bye_message}"
+            );
         }
     };
-    let status_res =
-        packets::clientbound::status::StatusResponse::set_json(Box::new(status_struct)).await;
-    status_res
-        .send_packet(client_stream)
-        .await
-        .map_err(|_| "Failed to send status packet")?;
 
-    mc_server::handle_ping(client_stream).await?;
-
-    Ok(())
+    return complete_status_request(client_stream, status_struct).await;
 }
 
-#[tracing::instrument(level = "info", fields(server_addr = server.get_addr()),skip(client_stream, handshake, server, api))]
-async fn handle_login<T>(
+#[tracing::instrument(level = "info", fields(server_addr = handshake.get_server_address()),skip(client_stream, handshake, api))]
+async fn handle_login<T: MinecraftServerHandle>(
     client_stream: &mut TcpStream,
     handshake: &Handshake,
-    server: impl MinecraftServerHandle,
     api: impl MinecraftAPI<T>,
 ) -> Result<(), OpaqueError> {
-    match server.query_status().await? {
+    let server = api.query_server(handshake.get_server_address()).await?;
+    let status = server.query_status().await?;
+    tracing::debug!(msg = "server status", status = ?status);
+    match status {
         ServerDeploymentStatus::Connectable(mut server_stream) => {
             // referenced from:
             // https://github.com/hanyu-dev/tokio-splice2/blob/fc47199fffde8946b0acf867d1fa0b2222267a34/examples/proxy.rs

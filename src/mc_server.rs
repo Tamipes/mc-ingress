@@ -3,6 +3,7 @@ use std::fmt;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::{
+    mc_server,
     packets::{
         clientbound::status::{StatusStructNew, StatusTrait},
         serverbound::handshake::Handshake,
@@ -25,6 +26,22 @@ pub async fn handle_ping(client_stream: &mut TcpStream) -> Result<(), OpaqueErro
             ping_packet.id.get_int()
         ))),
     }
+}
+/// small helper function for sending `status request` to client
+pub async fn complete_status_request(
+    client_stream: &mut TcpStream,
+    status_struct: StatusStructNew,
+) -> Result<(), OpaqueError> {
+    let status_res =
+        crate::packets::clientbound::status::StatusResponse::set_json(Box::new(status_struct))
+            .await;
+    status_res
+        .send_packet(client_stream)
+        .await
+        .map_err(|_| "Failed to send status packet")?;
+
+    mc_server::handle_ping(client_stream).await?;
+    Ok(())
 }
 
 /// Disconnects the client.
