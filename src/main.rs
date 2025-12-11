@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
+use tracing::Instrument;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
 use crate::mc_server::{MinecraftAPI, MinecraftServerHandle, ServerDeploymentStatus};
@@ -138,24 +139,33 @@ async fn handle_status<T: MinecraftServerHandle>(
     {
         Ok(x) => x,
         Err(e) => {
-            tracing::warn!(err = e.context);
+            let span = tracing::span!(tracing::Level::WARN, "not_found", err = e.context);
             status_struct.players.max = 0;
             status_struct.players.online = 0;
             status_struct.description.text = format!(
-                "Could not find §kserver§r: §f§o{server_addr}§r\nMinecraft Ingress    {bye_message}"
+                "Could not find §kserver§r: §f§o{server_addr}§r\nMinecraft Ingress   {bye_message}"
             );
 
-            mc_server::complete_status_request(client_stream, status_struct).await?;
+            mc_server::complete_status_request(client_stream, status_struct)
+                .instrument(span.clone())
+                .await?;
 
             // Recieve the ping packet, so the client does not send it again
-            let _ping = Packet::parse(client_stream).await?;
+            let _ping = Packet::parse(client_stream).instrument(span.clone()).await;
             // Send a bad ping packet back, so the client shows *searching* icon
             let _pong = Packet::new(9, vec![0; 8])
                 .ok_or("failed to create empty pong packet?")?
                 .send_packet(client_stream)
                 .await
                 .map_err(|_| "failed to send pong packet")?;
+            let _guard = span.enter();
 
+            match _ping {
+                Ok(_) => tracing::info!("sent status with error"),
+                Err(err) => {
+                    tracing::warn!(err = OpaqueError::from(err).context)
+                }
+            };
             return Ok(());
         }
     };
@@ -176,12 +186,12 @@ async fn handle_status<T: MinecraftServerHandle>(
             status_struct.players.max = 1;
             status_struct.players.online = 1;
             status_struct.description.text =
-                format!("{motd}\n§2Starting!§r §b§oWait a bit§r§b^^§r{bye_message}");
+                format!("{motd}\n§2Starting!§r §b§oWait a bit§r§b ^^§r{bye_message}");
         }
         ServerDeploymentStatus::Offline => {
             status_struct.players.max = 1;
             status_struct.description.text =
-                format!("{motd}\n§4Offline§r §2§oJoin to start!§r{bye_message}");
+                format!("{motd}\n§4Offline§r §oJoin to start!§r{bye_message}");
         }
     };
 
