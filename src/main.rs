@@ -1,3 +1,4 @@
+use evalexpr::*;
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -38,23 +39,22 @@ async fn main() {
     let api = kube_cache::McApi::create().unwrap();
     tracing::info!("initialized kube api");
 
-    let addr = match env::var("BIND_ADDR") {
-        Ok(x) => x,
-        Err(_) => "0.0.0.0:25565".to_string(),
-    };
-    let listener = TcpListener::bind(addr.clone()).await.unwrap();
-    tracing::info!(addr, "started tcp server");
+    let config: Config = Default::default();
+
+    let listener = TcpListener::bind(config.bind_addr.clone()).await.unwrap();
+    tracing::info!(bind_addr = config.bind_addr, "started tcp server");
 
     loop {
         let (socket, addr) = listener.accept().await.unwrap();
         let api = api.clone();
 
+        let config = config.clone();
         tokio::spawn(async move {
             tracing::debug!(
                 addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                 "Client connected"
             );
-            if let Err(e) = process_connection(socket, addr, api).await {
+            if let Err(e) = process_connection(socket, addr, api, config).await {
                 tracing::error!(
                     // addr = format!("{}:{}", addr.ip().to_string(), addr.port().to_string()),
                     trace = format!("{}", e.get_span_trace()),
@@ -71,11 +71,12 @@ async fn main() {
     }
 }
 
-#[tracing::instrument(level = "info", skip(api, client_stream))]
+#[tracing::instrument(level = "info", skip(api, client_stream, config))]
 async fn process_connection<T: MinecraftServerHandle>(
     mut client_stream: TcpStream,
     addr: SocketAddr,
     api: impl MinecraftAPI<T>,
+    config: Config,
 ) -> Result<(), OpaqueError> {
     let client_packet = Packet::parse(&mut client_stream).await?;
 
@@ -91,6 +92,18 @@ async fn process_connection<T: MinecraftServerHandle>(
     handshake = packets::serverbound::handshake::Handshake::parse(client_packet)
         .await
         .ok_or_else(|| "Client HANDSHAKE -> malformed packet; Disconnecting...".to_string())?;
+
+    let filter = eval_boolean(&format!(
+        "addr=\"{}\";{}",
+        handshake.get_server_address(),
+        config.filter_conn
+    ))
+    .map_err(|e| format!("filter error! err={:?}", e))?;
+    if filter {
+        // TODO: if the server just returns here, the client does not know it
+        // and sends a packet with the 122 WeirdID
+        return Ok(());
+    }
 
     next_server_state = handshake.get_next_state();
 
@@ -255,4 +268,28 @@ async fn handle_login<T: MinecraftServerHandle>(
         }
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct Config {
+    pub filter_conn: String,
+    pub bind_addr: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let filter_conn = match env::var("FILTER_CONN") {
+            Ok(x) => x,
+            Err(_) => "(addr == \"10.100.0.1\")".to_string(),
+        };
+
+        let bind_addr = match env::var("BIND_ADDR") {
+            Ok(x) => x,
+            Err(_) => "0.0.0.0:25565".to_string(),
+        };
+        Self {
+            filter_conn,
+            bind_addr,
+        }
+    }
 }

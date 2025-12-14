@@ -3,7 +3,7 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 use crate::{
     packets::{
         clientbound::status::{StatusStructNew, StatusTrait},
-        serverbound::handshake::{self, Handshake},
+        serverbound::handshake::Handshake,
         Packet, SendPacket,
     },
     OpaqueError,
@@ -136,4 +136,35 @@ pub enum ServerDeploymentStatus {
     Starting,
     PodOk,
     Offline,
+}
+
+pub fn sanitize_addr(addr: &str) -> &str {
+    // Thanks to a buggy minecraft, when the client sends a join
+    // from a SRV DNS record, it will not use the address typed
+    // in the game, but use the address redicted *to* by the
+    // DNS record as the address for joining, plus a trailing "."
+    //
+    // For example:
+    // server.example.com (_minecraft._tcp.server.example.com)
+    // (the typed address)     I (the DNS SRV record which gets read)
+    //                         V
+    //            5 25565 server.example.com
+    //                         I (the response for the DNS SRV query)
+    //                         V
+    //                server.example.com.
+    //         (the address used in the protocol)
+    let addr = addr.trim_end_matches(".");
+
+    // Modded minecraft clients send null terminated strings,
+    // after which they have extra data. This just removes them
+    // from the addr lookup
+    let addr = terminate_at_null(addr);
+    addr
+}
+
+fn terminate_at_null(str: &str) -> &str {
+    match str.split('\0').next() {
+        Some(x) => x,
+        None => str,
+    }
 }
