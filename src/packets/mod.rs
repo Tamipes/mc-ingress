@@ -74,15 +74,19 @@ impl Packet {
             return Err(ParseError::WeirdID.into());
         }
 
+        let lenght_value = length.get_int() as usize;
+        let length_value_length = id.get_data().len();
+        if lenght_value < length_value_length {
+            return Err(ParseError::PacketLengthInvalid(length.get_int()).into());
+        }
+        let data_size = lenght_value - length_value_length;
+
         // TODO: investigate this, becuase it is just a hunch
         // but if it is too big, the vec![] macro panics
-        let data_size = length.get_int() as usize - id.get_data().len();
         if data_size > u16::MAX.into() {
             return Err(ParseError::LengthIsTooBig(length.get_int()).into());
         }
-        if data_size < 0 {
-            return Err(ParseError::PacketLengthInvalid(length.get_int()).into());
-        }
+
         // TODO: this is a bandaid fix; the above checks *should* make sure the
         // next line does not run into "capacity overflow", but it doesn't work
         let mut data: Vec<u8> = match std::panic::catch_unwind(|| vec![0; data_size]) {
